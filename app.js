@@ -32,7 +32,10 @@ const geminiModelRow = document.getElementById('geminiModelRow');
 const geminiModelSelect = document.getElementById('geminiModelSelect');
 const geminiModelHint = document.getElementById('geminiModelHint');
 // Local mode elements
-const localModeToggle = document.getElementById('localModeToggle');
+const imsFolderBtn = document.getElementById('imsFolderBtn');
+const imsUploadBtn = document.getElementById('imsUploadBtn');
+const uploadPanel = document.getElementById('uploadPanel');
+const localModePanel = document.getElementById('localModePanel');
 const localStatus = document.getElementById('localStatus');
 const localModePanel = document.getElementById('localModePanel');
 const localInputLabel = document.getElementById('localInputLabel');
