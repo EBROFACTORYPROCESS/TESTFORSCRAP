@@ -1128,13 +1128,102 @@ function buildKeyParameterSummary(tasks) {
   return { keyStats, statuses };
 }
 
+
+/**
+ * Compute a 0-100 data quality score based on:
+ *   - Key parameters (70% weight)
+ *   - Other fields  (30% weight)
+ *
+ * Returns:
+ * {
+ *   score: number (0-100, one decimal),
+ *   keyPresent: number,
+ *   keyTotal: number,
+ *   otherPresent: number,
+ *   otherTotal: number,
+ *   level: 'good' | 'warn' | 'bad'
+ * }
+ */
+function computeQualityScore(tasks) {
+  let keyPresent = 0;
+  let keyTotal = 0;
+  let otherPresent = 0;
+  let otherTotal = 0;
+
+  const keyPathSet = new Set(KEY_PARAMETERS.map(kp => kp.path));
+
+  tasks.forEach(task => {
+    const flat = flattenJson(task.json || {});
+
+    Object.keys(flat).forEach(path => {
+      // Skip internal fields
+      if (path === '_file' || path === '_taskId' || path === '_edited') return;
+
+      const value = flat[path];
+      const missing = isValueMissing(path, value);
+      const isKey = keyPathSet.has(path);
+
+      if (isKey) {
+        keyTotal++;
+        if (!missing) keyPresent++;
+      } else {
+        otherTotal++;
+        if (!missing) otherPresent++;
+      }
+    });
+  });
+
+  const keyRatio = keyTotal > 0 ? keyPresent / keyTotal : 1;
+  const otherRatio = otherTotal > 0 ? otherPresent / otherTotal : 1;
+  const raw = keyRatio * 0.7 + otherRatio * 0.3;
+  const score = Math.round(raw * 1000) / 10; // one decimal
+
+  let level = 'bad';
+  if (score >= 90) level = 'good';
+  else if (score >= 70) level = 'warn';
+
+  return {
+    score,
+    keyPresent,
+    keyTotal,
+    otherPresent,
+    otherTotal,
+    level
+  };
+}
+
+
 /**
  * Render the summary report at the top of the results section.
  */
-function renderSummaryReport(keyStats, totalRows) {
+/**
+ * Render the summary report at the top of the results section.
+ * Now includes a data quality score.
+ */
+function renderSummaryReport(keyStats, totalRows, tasks) {
   const container = document.getElementById('summaryReport');
   if (!container) return;
 
+  // ---- Quality score ----
+  const quality = computeQualityScore(tasks);
+
+  const scoreHTML = `
+    <div class="sr-score ${quality.level}">
+      <div class="score-main">
+        <span class="score-value">${quality.score.toFixed(1)}%</span>
+        <span class="score-label">Data Quality</span>
+      </div>
+      <div class="score-bar">
+        <div class="score-bar-fill" style="width: ${quality.score}%"></div>
+      </div>
+      <div class="score-detail">
+        Key parameters: <b>${quality.keyPresent}/${quality.keyTotal}</b> present<br>
+        Other fields: <b>${quality.otherPresent}/${quality.otherTotal}</b> present
+      </div>
+    </div>
+  `;
+
+  // ---- Key parameter items ----
   const items = KEY_PARAMETERS.map(kp => {
     const stat = keyStats[kp.path];
     const missing = stat.missingCount;
@@ -1155,7 +1244,8 @@ function renderSummaryReport(keyStats, totalRows) {
   }).join('');
 
   container.innerHTML = `
-    <div class="sr-title">📊 Key Parameters Summary · ${totalRows} form(s) processed</div>
+    <div class="sr-title">📊 Data Quality Audit · ${totalRows} form(s) processed</div>
+    ${scoreHTML}
     <div class="sr-grid">${items}</div>
   `;
   container.style.display = 'block';
@@ -1164,7 +1254,7 @@ function renderSummaryReport(keyStats, totalRows) {
 function renderResultTable(tasks) {
   // ---- Build key parameter summary ----
   const { keyStats, statuses } = buildKeyParameterSummary(tasks);
-  renderSummaryReport(keyStats, tasks.length);  
+  renderSummaryReport(keyStats, tasks.length, tasks);
   const rows = tasks.map(t => ({
     _taskId: t.id,
     _file: buildFilePath(t.file),
@@ -1556,26 +1646,104 @@ function onDownloadExcel() {
     showStatus('No successful results to export.', 'error');
     return;
   }
+
+  const wb = XLSX.utils.book_new();
+
+  // ========================================================
+  //  Sheet 1: EBRO Merged (main data)
+  // ========================================================
   const rows = successTasks.map(t => ({
     _file: buildFilePath(t.file),
     ...flattenJson(t.json)
   }));
+
   const headerSet = new Set(['_file']);
   rows.forEach(r => Object.keys(r).forEach(k => headerSet.add(k)));
   const headers = Array.from(headerSet);
 
   const aoa = [headers, ...rows.map(r => headers.map(h => r[h] ?? ''))];
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = headers.map(h => ({ wch: h === '_file' ? 40 : 22 }));
+  const wsMain = XLSX.utils.aoa_to_sheet(aoa);
+  wsMain['!cols'] = headers.map(h => ({ wch: h === '_file' ? 40 : 22 }));
+  XLSX.utils.book_append_sheet(wb, wsMain, 'EBRO Merged');
 
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'EBRO Merged');
+  // ========================================================
+  //  Sheet 2: Extraction Results (with status lights)
+  // ========================================================
+  const { keyStats, statuses } = buildKeyParameterSummary(successTasks);
+
+  const erHeader = ['#', 'Status', 'Judgement Reason', ...headers];
+  const erRows = successTasks.map((t, i) => {
+    const flat = flattenJson(t.json);
+    const statusInfo = statuses[t.id] || { level: 'green', reasons: [] };
+
+    // Map level to a letter for compactness
+    const statusLetter = { green: 'GREEN', yellow: 'YELLOW', red: 'RED' }[statusInfo.level] || 'GREEN';
+    const reasonText = statusInfo.reasons.length
+      ? statusInfo.reasons.join(' | ')
+      : 'All fields present and valid';
+
+    return [
+      i + 1,
+      statusLetter,
+      reasonText,
+      ...headers.map(h => flat[h] ?? '')
+    ];
+  });
+
+  const wsER = XLSX.utils.aoa_to_sheet([erHeader, ...erRows]);
+  wsER['!cols'] = [
+    { wch: 5 },   // #
+    { wch: 10 },  // Status
+    { wch: 60 },  // Reason
+    ...headers.map(h => ({ wch: h === '_file' ? 40 : 22 }))
+  ];
+  XLSX.utils.book_append_sheet(wb, wsER, 'Extraction Results');
+
+  // ========================================================
+  //  Sheet 3: Parameter Summary + Quality Score
+  // ========================================================
+  const quality = computeQualityScore(successTasks);
+
+  const psAoa = [
+    ['Data Quality Audit'],
+    [],
+    ['Overall Quality Score', `${quality.score.toFixed(1)}%`],
+    ['Key Parameters Present', `${quality.keyPresent} / ${quality.keyTotal}`],
+    ['Other Fields Present', `${quality.otherPresent} / ${quality.otherTotal}`],
+    ['Total Forms Processed', successTasks.length],
+    [],
+    ['Key Parameter', 'Missing Count', 'Present Count', 'Total Forms', 'Status']
+  ];
+
+  KEY_PARAMETERS.forEach(kp => {
+    const stat = keyStats[kp.path];
+    const present = stat.total - stat.missingCount;
+    let status = 'COMPLETE';
+    if (stat.missingCount > 0) {
+      status = stat.missingCount === stat.total ? 'ALL MISSING' : 'PARTIAL';
+    }
+    psAoa.push([kp.label, stat.missingCount, present, stat.total, status]);
+  });
+
+  const wsPS = XLSX.utils.aoa_to_sheet(psAoa);
+  wsPS['!cols'] = [
+    { wch: 28 },  // Key Parameter
+    { wch: 14 },  // Missing
+    { wch: 14 },  // Present
+    { wch: 12 },  // Total
+    { wch: 14 }   // Status
+  ];
+  XLSX.utils.book_append_sheet(wb, wsPS, 'Parameter Summary');
+
+  // ========================================================
+  //  Save
+  // ========================================================
   const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
   XLSX.writeFile(wb, `ebro-batch-${timestamp}.xlsx`);
 
   const editedCount = successTasks.filter(t => t.edited).length;
   showStatus(
-    `📊 Exported ${rows.length} row(s)` +
+    `📊 Exported ${rows.length} row(s) across 3 sheets` +
     (editedCount ? ` (${editedCount} with manual edits).` : '.'),
     'success'
   );
