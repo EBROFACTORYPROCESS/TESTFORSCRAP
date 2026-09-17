@@ -71,7 +71,6 @@ let isRunning = false;
 let idCounter = 0;
 let editingTaskId = null;
 let editingDraft = null;
-let localMode = false;
 let localHandles = { input: null, readed: null, error: null };
 let inputMethod = 'folder'; // 'folder' | 'upload'
 
