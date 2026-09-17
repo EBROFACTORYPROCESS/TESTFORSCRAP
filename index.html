@@ -4,16 +4,21 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>EBRO Scrap Form Processor</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📄</text></svg>">  
-<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script> 
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📄</text></svg>">
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
 <div class="container">
-  <h1>📄 EBRO Scrap Form Processor </h1>
+  <h1>📄 EBRO Scrap Form Processor</h1>
   <p class="subtitle">Choose AI platform, upload images, extract, edit, and export merged Excel.</p>
 
+  <!-- =====================================================
+       Configuration Card (Platform, API Key, Model, Input Method)
+       ===================================================== -->
   <div class="card">
+
+    <!-- Platform + API Key -->
     <div class="field-row">
       <div class="field">
         <label for="platformSelect">AI Platform</label>
@@ -29,7 +34,8 @@
         <p class="hint" id="apiKeyHint"></p>
       </div>
     </div>
-    <!-- Gemini model selector (only visible when Gemini is selected) -->
+
+    <!-- Gemini Model selector (only visible for Gemini) -->
     <div class="field-row" id="geminiModelRow" style="display: none;">
       <div class="field">
         <label for="geminiModelSelect">Gemini Model</label>
@@ -37,6 +43,8 @@
         <p class="hint" id="geminiModelHint"></p>
       </div>
     </div>
+
+    <!-- DeepSeek Balance Panel (only visible for DeepSeek) -->
     <div id="balancePanel">
       <div class="balance-header">
         <span class="balance-title">💳 DeepSeek Account Balance</span>
@@ -44,23 +52,66 @@
       </div>
       <div id="balanceContent">Enter your API Key to check balance.</div>
     </div>
-    
+
     <!-- Input Method Selector -->
     <div class="input-method-selector">
       <span class="ims-label">Input Method:</span>
       <div class="ims-buttons" role="tablist">
-        <button class="ims-btn" id="imsFolderBtn" data-method="folder" role="tab">
-          📁 Local Folder
-        </button>
-        <button class="ims-btn" id="imsUploadBtn" data-method="upload" role="tab">
-          📤 Upload Files
-        </button>
+        <button class="ims-btn" id="imsFolderBtn" data-method="folder" role="tab">📁 Local Folder</button>
+        <button class="ims-btn" id="imsUploadBtn" data-method="upload" role="tab">📤 Upload Files</button>
       </div>
       <span class="local-status" id="localStatus">Not authorized</span>
     </div>
 
     <!-- Local Folder Panel (visible only when folder method is selected) -->
-  <!-- Upload Panel (visible only when upload method is selected) -->
+    <div id="localModePanel" class="input-method-panel" data-method="folder" style="display: none;">
+      <div class="local-path-row">
+        <label class="path-label" for="localInputLabel">Input folder (source images)</label>
+        <div class="path-input-group">
+          <input type="text" id="localInputLabel" placeholder="(no folder selected)" readonly />
+          <button id="localPickInputBtn">Select Input</button>
+        </div>
+      </div>
+
+      <div class="local-path-row">
+        <label class="path-label" for="localReadedLabel">Readed folder (success target)</label>
+        <div class="path-input-group">
+          <input type="text" id="localReadedLabel" placeholder="(no folder selected)" readonly />
+          <button id="localPickReadedBtn">Select Readed</button>
+        </div>
+      </div>
+
+      <div class="local-path-row">
+        <label class="path-label" for="localErrorLabel">Error folder (failure target)</label>
+        <div class="path-input-group">
+          <input type="text" id="localErrorLabel" placeholder="(no folder selected)" readonly />
+          <button id="localPickErrorBtn">Select Error</button>
+        </div>
+      </div>
+
+      <div class="button-row" style="margin-top: 8px;">
+        <button class="btn" id="localLoadBtn" disabled>📥 Load Images from Input Folder</button>
+        <button class="btn btn-excel" id="localProcessBtn" disabled>🚀 Process &amp; Move Files</button>
+      </div>
+    </div>
+
+    <!-- Shared settings -->
+    <div class="field-row">
+      <div class="field">
+        <label for="pathPrefix">Source Path Prefix (prepended to the <code>_file</code> column)</label>
+        <input type="text" id="pathPrefix" value="c/download/" placeholder="e.g. c/download/" />
+      </div>
+      <div class="field">
+        <label for="maxSize">Max image dimension (px, longest side)</label>
+        <input type="number" id="maxSize" value="1600" min="600" max="4000" step="100" />
+        <p class="hint">Smaller = faster upload &amp; lower token cost.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- =====================================================
+       Upload Panel (visible only when upload method is selected)
+       ===================================================== -->
   <div class="card input-method-panel" data-method="upload" id="uploadPanel">
     <div class="upload-area" id="uploadArea">
       <div class="icon">📤</div>
@@ -85,86 +136,9 @@
     <div class="queue-list" id="queueList"></div>
   </div>
 
-      <div class="local-path-row">
-        <label class="path-label">Readed folder (success target)</label>
-        <div class="path-input-group">
-          <input type="text" id="localReadedLabel" placeholder="(no folder selected)" readonly />
-          <button id="localPickReadedBtn">Select Readed</button>
-        </div>
-      </div>
-
-      <div class="local-path-row">
-        <label class="path-label">Error folder (failure target)</label>
-        <div class="path-input-group">
-          <input type="text" id="localErrorLabel" placeholder="(no folder selected)" readonly />
-          <button id="localPickErrorBtn">Select Error</button>
-        </div>
-      </div>
-
-      <div class="button-row" style="margin-top: 8px;">
-        <button class="btn" id="localLoadBtn" disabled>📥 Load Images from Input Folder</button>
-        <button class="btn btn-excel" id="localProcessBtn" disabled>🚀 Process &amp; Move Files</button>
-      </div>
-    </div>
-
-      <div class="local-path-row">
-        <label class="path-label">Readed folder (success target)</label>
-        <div class="path-input-group">
-          <input type="text" id="localReadedLabel" placeholder="(no folder selected)" readonly />
-          <button id="localPickReadedBtn">Select Readed</button>
-        </div>
-      </div>
-
-      <div class="local-path-row">
-        <label class="path-label">Error folder (failure target)</label>
-        <div class="path-input-group">
-          <input type="text" id="localErrorLabel" placeholder="(no folder selected)" readonly />
-          <button id="localPickErrorBtn">Select Error</button>
-        </div>
-      </div>
-
-      <div class="button-row" style="margin-top: 8px;">
-        <button class="btn" id="localLoadBtn" disabled>📥 Load Images from Input Folder</button>
-        <button class="btn btn-excel" id="localProcessBtn" disabled>🚀 Process &amp; Move Files</button>
-      </div>
-    </div>
-    <div class="field-row">
-      <div class="field">
-        <label for="pathPrefix">Source Path Prefix (prepended to the <code>_file</code> column)</label>
-        <input type="text" id="pathPrefix" value="c/download/" placeholder="e.g. c/download/" />
-      </div>
-      <div class="field">
-        <label for="maxSize">Max image dimension (px, longest side)</label>
-        <input type="number" id="maxSize" value="1600" min="600" max="4000" step="100" />
-        <p class="hint">Smaller = faster upload &amp; lower token cost.</p>
-      </div>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="upload-area" id="uploadArea">
-      <div class="icon">📤</div>
-      <p>Click to select images, or drag &amp; drop multiple files here</p>
-      <p class="hint" style="margin-top: 4px;">Supports JPG, PNG, WEBP — images are auto-resized before upload</p>
-    </div>
-    <input type="file" id="fileInput" accept="image/*" multiple style="display: none;" />
-
-    <div class="button-row">
-      <button class="btn" id="extractBtn" disabled>🚀 Start Batch Extraction</button>
-      <button class="btn btn-retry-all" id="retryAllBtn" disabled>🔁 Retry Failed</button>
-      <button class="btn btn-clear" id="clearBtn" disabled>🗑️ Clear</button>
-    </div>
-    <div class="status" id="status"></div>
-
-    <div class="progress-bar-wrap" id="progressWrap" style="display: none;">
-      <div class="progress-bar" id="progressBar"></div>
-    </div>
-
-    <div class="summary" id="summary" style="display: none;"></div>
-
-    <div class="queue-list" id="queueList"></div>
-  </div>
-
+  <!-- =====================================================
+       Extraction Results
+       ===================================================== -->
   <div class="card result-section" id="resultSection">
     <div class="result-header">
       <h2>✅ Extraction Results</h2>
@@ -172,8 +146,10 @@
     </div>
 
     <div class="issues-banner" id="issuesBanner"></div>
-    <!-- Key Parameters Summary -->
+
+    <!-- Key Parameters Summary + Data Quality Score -->
     <div id="summaryReport" class="summary-report"></div>
+
     <div class="table-wrap">
       <table class="result-table" id="resultTable"></table>
     </div>
@@ -193,7 +169,9 @@
   </div>
 </div>
 
-<!-- Edit Modal -->
+<!-- =====================================================
+     Edit Modal
+     ===================================================== -->
 <div class="modal-overlay" id="modalOverlay">
   <div class="modal">
     <div class="modal-header">
