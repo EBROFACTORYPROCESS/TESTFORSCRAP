@@ -43,7 +43,45 @@
       </div>
       <div id="balanceContent">Enter your API Key to check balance.</div>
     </div>
+    <!-- Local Folder Mode (File System Access API) -->
+    <div class="local-mode-toggle">
+      <label>
+        <input type="checkbox" id="localModeToggle" />
+        📁 Local Folder Mode (browser-native, no Node.js required)
+      </label>
+      <span class="local-status" id="localStatus">Not authorized</span>
+    </div>
 
+    <div id="localModePanel" style="display: none;">
+      <div class="local-path-row">
+        <label class="path-label">Input folder (source images)</label>
+        <div class="path-input-group">
+          <input type="text" id="localInputLabel" placeholder="(no folder selected)" readonly />
+          <button id="localPickInputBtn">Select Input</button>
+        </div>
+      </div>
+
+      <div class="local-path-row">
+        <label class="path-label">Readed folder (success target)</label>
+        <div class="path-input-group">
+          <input type="text" id="localReadedLabel" placeholder="(no folder selected)" readonly />
+          <button id="localPickReadedBtn">Select Readed</button>
+        </div>
+      </div>
+
+      <div class="local-path-row">
+        <label class="path-label">Error folder (failure target)</label>
+        <div class="path-input-group">
+          <input type="text" id="localErrorLabel" placeholder="(no folder selected)" readonly />
+          <button id="localPickErrorBtn">Select Error</button>
+        </div>
+      </div>
+
+      <div class="button-row" style="margin-top: 8px;">
+        <button class="btn" id="localLoadBtn" disabled>📥 Load Images from Input Folder</button>
+        <button class="btn btn-excel" id="localProcessBtn" disabled>🚀 Process &amp; Move Files</button>
+      </div>
+    </div>
     <div class="field-row">
       <div class="field">
         <label for="pathPrefix">Source Path Prefix (prepended to the <code>_file</code> column)</label>
