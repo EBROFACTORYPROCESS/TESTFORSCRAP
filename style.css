@@ -791,3 +791,66 @@ table.result-table td.status-col {
 .sr-score.bad { border-color: #f1aeb5; background: #fdf1f2; }
 .sr-score.bad .score-value { color: #842029; }
 .sr-score.bad .score-bar-fill { background: #dc3545; }
+/* ---------- Input Method Selector ---------- */
+.input-method-selector {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+  padding: 10px 14px;
+  background: #f8f9fa;
+  border: 1px solid #e5e5e5;
+  border-radius: 10px;
+  flex-wrap: wrap;
+}
+.input-method-selector .ims-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #555;
+}
+.input-method-selector .ims-buttons {
+  display: inline-flex;
+  background: #e9ecef;
+  border-radius: 8px;
+  padding: 3px;
+  gap: 3px;
+}
+.input-method-selector .ims-btn {
+  border: none;
+  background: transparent;
+  padding: 8px 16px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  color: #555;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.input-method-selector .ims-btn:hover:not(.active) {
+  background: rgba(255,255,255,0.6);
+}
+.input-method-selector .ims-btn.active {
+  background: #fff;
+  color: #084298;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+}
+.input-method-selector .local-status {
+  font-size: 12px;
+  color: #666;
+  margin-left: auto;
+}
+.input-method-selector .local-status.connected {
+  color: #0f5132;
+  font-weight: 600;
+}
+.input-method-selector .local-status.error {
+  color: #d32f2f;
+  font-weight: 600;
+}
+
+/* Panels toggled by input method */
+.input-method-panel[data-method].hidden {
+  display: none !important;
+}
