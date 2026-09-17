@@ -643,6 +643,36 @@ async function retryOne(id) {
   if (!task || task.status !== 'error') return;
 
   isRunning = true;
+  updateButtonState();
+  updateLocalModeButtons();
+
+  // ---- Step 1: If the file was already moved to error/, pull it back to input/ ----
+  if (localMode && task.currentLocation === 'error' && task.movedTo) {
+    try {
+      const pulledBack = await pullFileBackFromFolder(
+        localHandles.error,
+        localHandles.input,
+        task.movedTo
+      );
+      // Update task to reflect the file is now back in input
+      task.localHandle = pulledBack.handle;
+      task.localName = pulledBack.name;
+      task.movedTo = null;
+      task.currentLocation = 'input';
+      console.log(`Pulled back ${pulledBack.name} from error/ to input/`);
+    } catch (pullErr) {
+      console.error('Pull back failed:', pullErr);
+      task.error = 'Pull back failed: ' + pullErr.message;
+      task.status = 'error';
+      isRunning = false;
+      renderQueue();
+      updateButtonState();
+      updateLocalModeButtons();
+      showStatus(`❌ Could not pull back ${task.localName} from error folder.`, 'error');
+      return;
+    }
+  }
+
   task.status = 'processing';
   task.error = null;
   renderQueue();
@@ -650,6 +680,7 @@ async function retryOne(id) {
 
   const platform = getCurrentPlatform();
 
+  // ---- Step 2: Retry AI extraction ----
   try {
     await rateLimiter.wait();
     const json = await extractOneWithRetry(task, apiKey, platform);
@@ -658,26 +689,47 @@ async function retryOne(id) {
     task.edited = false;
     task.status = 'success';
     task.error = null;
-    showStatus(`✅ Retried successfully: ${task.file.name}`, 'success');
   } catch (err) {
     console.error(err);
     task.error = err.message || 'Unknown error';
     task.status = 'error';
-    showStatus(`❌ Retry failed: ${task.file.name}`, 'error');
+  }
+
+  // ---- Step 3: Move the file based on the new outcome (local mode only) ----
+  if (localMode && task.localHandle && task.localName) {
+    try {
+      const targetHandle = task.status === 'success' ? localHandles.readed : localHandles.error;
+      const movedName = await moveLocalFile(task, targetHandle);
+      task.movedTo = movedName;
+      task.currentLocation = task.status === 'success' ? 'readed' : 'error';
+    } catch (moveErr) {
+      console.error('Move after retry failed:', moveErr);
+      task.error = (task.error ? task.error + ' | ' : '') + 'Move failed: ' + moveErr.message;
+    }
   }
 
   isRunning = false;
   renderQueue();
   updateButtonState();
+  updateLocalModeButtons();
 
   if (platform === 'deepseek') fetchDeepSeekBalance();
 
+  showStatus(
+    task.status === 'success'
+      ? `✅ Retried successfully: ${task.file.name}`
+      : `❌ Retry failed: ${task.file.name}`,
+    task.status === 'success' ? 'success' : 'error'
+  );
+
+  // Refresh result table
   const successTasks = queue.filter(t => t.status === 'success' && t.json);
   if (successTasks.length) {
     renderResultTable(successTasks);
     resultSection.style.display = 'block';
   }
 
+  // Refresh summary
   const successCount = queue.filter(t => t.status === 'success').length;
   const failedCount = queue.filter(t => t.status === 'error').length;
   const pendingCount = queue.filter(t => t.status === 'waiting').length;
@@ -1683,6 +1735,7 @@ async function processLocalBatch() {
       const targetHandle = task.status === 'success' ? localHandles.readed : localHandles.error;
       const movedName = await moveLocalFile(task, targetHandle);
       task.movedTo = movedName;
+      task.currentLocation = task.status === 'success' ? 'readed' : 'error';
     } catch (moveErr) {
       console.error('Move failed:', task.localName, moveErr);
       task.error = (task.error ? task.error + ' | ' : '') + 'Move failed: ' + moveErr.message;
