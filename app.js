@@ -31,6 +31,18 @@ const downloadExcelBtn = document.getElementById('downloadExcelBtn');
 const geminiModelRow = document.getElementById('geminiModelRow');
 const geminiModelSelect = document.getElementById('geminiModelSelect');
 const geminiModelHint = document.getElementById('geminiModelHint');
+// Local mode elements
+const localModeToggle = document.getElementById('localModeToggle');
+const localStatus = document.getElementById('localStatus');
+const localModePanel = document.getElementById('localModePanel');
+const localInputLabel = document.getElementById('localInputLabel');
+const localReadedLabel = document.getElementById('localReadedLabel');
+const localErrorLabel = document.getElementById('localErrorLabel');
+const localPickInputBtn = document.getElementById('localPickInputBtn');
+const localPickReadedBtn = document.getElementById('localPickReadedBtn');
+const localPickErrorBtn = document.getElementById('localPickErrorBtn');
+const localLoadBtn = document.getElementById('localLoadBtn');
+const localProcessBtn = document.getElementById('localProcessBtn');
 
 // Modal
 const modalOverlay = document.getElementById('modalOverlay');
