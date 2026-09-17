@@ -73,6 +73,7 @@ let editingTaskId = null;
 let editingDraft = null;
 let localMode = false;
 let localHandles = { input: null, readed: null, error: null };
+let inputMethod = 'folder'; // 'folder' | 'upload'
 
 const zoomState = { scale: 1, naturalW: 0, naturalH: 0, fitMode: null };
 
