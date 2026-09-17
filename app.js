@@ -1393,7 +1393,8 @@ function onDownloadExcel() {
     (editedCount ? ` (${editedCount} with manual edits).` : '.'),
     'success'
   );
-  // ============================================================
+}
+// ============================================================
   //  Local Folder Mode (File System Access API)
   //  No Node.js required. Works in Chrome / Edge / Opera.
   // ============================================================
@@ -1758,3 +1759,4 @@ function onDownloadExcel() {
     });
   };
 }
+
