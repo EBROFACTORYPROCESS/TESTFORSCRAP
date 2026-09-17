@@ -1808,3 +1808,47 @@ async function moveLocalFile(task, targetDirHandle) {
 
   return finalName;
 }
+/**
+ * Move a file from one folder back to another, and return a new handle
+ * pointing to its new location.
+ *
+ * Used by retryOne() to pull a file out of error/ back into input/ before retrying.
+ */
+async function pullFileBackFromFolder(sourceDirHandle, targetDirHandle, fileName) {
+  if (!sourceDirHandle || !targetDirHandle || !fileName) {
+    throw new Error('Missing arguments for pull back');
+  }
+
+  // Locate the file in the source folder
+  const sourceFileHandle = await sourceDirHandle.getFileHandle(fileName, { create: false });
+
+  // Ensure the target doesn't already have a file with the same name
+  let finalName = fileName;
+  let attempts = 0;
+  while (attempts < 3) {
+    try {
+      await targetDirHandle.getFileHandle(finalName, { create: false });
+      // Collision → rename
+      const dot = finalName.lastIndexOf('.');
+      const base = dot > 0 ? finalName.slice(0, dot) : finalName;
+      const ext = dot > 0 ? finalName.slice(dot) : '';
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      finalName = `${base}_${ts}${ext}`;
+      attempts++;
+    } catch (e) {
+      break; // no collision
+    }
+  }
+
+  // Copy content to the target folder
+  const srcFile = await sourceFileHandle.getFile();
+  const destHandle = await targetDirHandle.getFileHandle(finalName, { create: true });
+  const writable = await destHandle.createWritable();
+  await writable.write(srcFile);
+  await writable.close();
+
+  // Remove from the source folder
+  await sourceDirHandle.removeEntry(fileName);
+
+  return { handle: destHandle, name: finalName };
+}
