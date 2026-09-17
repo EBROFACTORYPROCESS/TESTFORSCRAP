@@ -367,7 +367,143 @@ function renderDeepSeekBalance(data) {
     </div>
   `;
 }
+/**
+ * Read the EXIF orientation value from a JPEG File.
+ * Returns 1 if not found or not a JPEG.
+ *
+ * Values:
+ *   1 = normal
+ *   2 = flip horizontal
+ *   3 = rotate 180
+ *   4 = flip vertical
+ *   5 = rotate 90 CW + flip horizontal
+ *   6 = rotate 90 CW
+ *   7 = rotate 90 CCW + flip horizontal
+ *   8 = rotate 90 CCW
+ */
+async function readExifOrientation(file) {
+  try {
+    // Only JPEG supports this EXIF tag
+    if (!/image\/jpe?g/i.test(file.type)) return 1;
 
+    const buf = await file.slice(0, 128 * 1024).arrayBuffer(); // read first 128 KB
+    const view = new DataView(buf);
+
+    // Check JPEG magic bytes
+    if (view.getUint16(0, false) !== 0xFFD8) return 1;
+
+    const length = view.byteLength;
+    let offset = 2;
+
+    while (offset < length) {
+      if (view.getUint16(offset, false) === 0xFFE1) { // APP1
+        offset += 2;
+        const exifHeader = view.getUint32(offset, false);
+        // "Exif" = 0x45786966
+        if (exifHeader !== 0x45786966) return 1;
+
+        offset += 6; // skip "Exif\0\0"
+        const tiffStart = offset;
+        const bigEndian = view.getUint16(tiffStart, false) === 0x4D4D;
+        const endian = bigEndian ? false : true;
+
+        // Check TIFF magic
+        if (view.getUint16(tiffStart + 2, endian) !== 0x002A) return 1;
+
+        const ifdOffset = view.getUint32(tiffStart + 4, endian);
+        const dirStart = tiffStart + ifdOffset;
+        const entries = view.getUint16(dirStart, endian);
+
+        for (let i = 0; i < entries; i++) {
+          const entryOffset = dirStart + 2 + i * 12;
+          const tag = view.getUint16(entryOffset, endian);
+          if (tag === 0x0112) { // Orientation
+            return view.getUint16(entryOffset + 8, endian);
+          }
+        }
+        return 1;
+      }
+      offset += 2 + view.getUint16(offset + 2, false);
+    }
+    return 1;
+  } catch (e) {
+    console.warn('EXIF read failed:', e);
+    return 1;
+  }
+}
+
+/**
+ * Load an image file, apply EXIF orientation, and return an HTMLImageElement
+ * that is already correctly oriented.
+ */
+async function loadImageOriented(file) {
+  const orientation = await readExifOrientation(file);
+  const img = await loadImage(file); // existing helper
+
+  // If orientation is normal (1) or unsupported, return as-is
+  if (orientation === 1) return { img, orientation };
+
+  // Create a canvas, apply the transform, return the transformed image
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+
+  // Determine output dimensions based on orientation
+  const swap = orientation >= 5 && orientation <= 8;
+  canvas.width = swap ? img.height : img.width;
+  canvas.height = swap ? img.width : img.height;
+
+  switch (orientation) {
+    case 2: // flip horizontal
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
+      break;
+    case 3: // rotate 180
+      ctx.translate(canvas.width, canvas.height);
+      ctx.rotate(Math.PI);
+      break;
+    case 4: // flip vertical
+      ctx.translate(0, canvas.height);
+      ctx.scale(1, -1);
+      break;
+    case 5: // rotate 90 CW + flip horizontal
+      ctx.translate(canvas.width, 0);
+      ctx.rotate(Math.PI / 2);
+      ctx.scale(-1, 1);
+      break;
+    case 6: // rotate 90 CW
+      ctx.translate(canvas.width, 0);
+      ctx.rotate(Math.PI / 2);
+      break;
+    case 7: // rotate 90 CCW + flip horizontal
+      ctx.translate(0, canvas.height);
+      ctx.rotate(-Math.PI / 2);
+      ctx.scale(-1, 1);
+      break;
+    case 8: // rotate 90 CCW
+      ctx.translate(0, canvas.height);
+      ctx.rotate(-Math.PI / 2);
+      break;
+  }
+
+  ctx.drawImage(img, 0, 0);
+
+  // Convert canvas back to an Image element
+  const orientedImg = await canvasToImage(canvas);
+  return { img: orientedImg, orientation };
+}
+
+function canvasToImage(canvas) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(blob => {
+      if (!blob) return reject(new Error('canvas.toBlob failed'));
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+      img.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
+      img.src = url;
+    }, 'image/jpeg', 0.95);
+  });
+}
 // ============================================================
 //  Upload / resize
 // ============================================================
@@ -389,7 +525,7 @@ function loadImage(file) {
 
 async function resizeImage(file) {
   const maxDim = getMaxSize();
-  const img = await loadImage(file);
+  const { img, orientation } = await loadImageOriented(file);
   let { width, height } = img;
   const longest = Math.max(width, height);
   let scale = 1;
@@ -413,7 +549,8 @@ async function resizeImage(file) {
     originalWidth: width, originalHeight: height,
     originalSize: file.size,
     resizedSize: blob ? blob.size : 0,
-    dataUrl: canvas.toDataURL('image/jpeg', 0.85)
+    dataUrl: canvas.toDataURL('image/jpeg', 0.85),
+    orientation  // ← 新增
   };
 }
 
