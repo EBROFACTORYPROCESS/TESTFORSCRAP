@@ -1551,14 +1551,13 @@ async function loadLocalFiles() {
     queue = [];
     idCounter = 0;
 
-    localStatus.textContent = `Loading ${files.length} file(s)...`;
+    localStatus.textContent = `Compressing ${files.length} file(s)...`;
 
     for (const f of files) {
-      const dataUrl = await fileToDataUrl(f.file);
       const task = {
         id: ++idCounter,
         file: f.file,
-        previewUrl: dataUrl,
+        previewUrl: null,
         status: 'waiting',
         json: null,
         originalJson: null,
@@ -1570,6 +1569,24 @@ async function loadLocalFiles() {
         resizedDataUrl: null,
         resizeInfo: null
       };
+
+      try {
+        const resized = await resizeImage(f.file);
+        task.resizedBlob = resized.blob;
+        task.resizedDataUrl = resized.dataUrl;
+        task.resizeInfo = {
+          original: `${resized.originalWidth}×${resized.originalHeight}`,
+          resized: `${resized.width}×${resized.height}`,
+          originalKB: Math.round(resized.originalSize / 1024),
+          resizedKB: Math.round(resized.resizedSize / 1024),
+        };
+        task.previewUrl = resized.dataUrl;
+      } catch (err) {
+        console.error('Resize failed:', f.name, err);
+        task.previewUrl = await fileToDataUrl(f.file);
+        task.resizeInfo = { error: 'Resize failed, using original' };
+      }
+
       queue.push(task);
     }
 
@@ -1577,7 +1594,16 @@ async function loadLocalFiles() {
     updateButtonState();
     updateLocalModeButtons();
 
-    localStatus.textContent = `✅ Loaded ${queue.length} image(s) from "${localHandles.input.name}"`;
+    const totalOrigKB = queue
+      .filter(t => t.resizeInfo && t.resizeInfo.originalKB)
+      .reduce((s, t) => s + t.resizeInfo.originalKB, 0);
+    const totalNewKB = queue
+      .filter(t => t.resizeInfo && t.resizeInfo.resizedKB)
+      .reduce((s, t) => s + t.resizeInfo.resizedKB, 0);
+
+    localStatus.textContent =
+      `✅ Loaded ${queue.length} image(s) from "${localHandles.input.name}" · ` +
+      `${totalOrigKB} KB → ${totalNewKB} KB`;
     localStatus.className = 'local-status connected';
   } catch (err) {
     console.error('loadLocalFiles error:', err);
@@ -1585,7 +1611,6 @@ async function loadLocalFiles() {
     localStatus.className = 'local-status error';
   }
 }
-
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -1614,6 +1639,7 @@ async function processLocalBatch() {
     return;
   }
 
+  // Verify permissions on target folders
   const okReaded = await verifyHandlePermission(localHandles.readed);
   const okError = await verifyHandlePermission(localHandles.error);
   if (!okReaded || !okError) {
@@ -1636,6 +1662,7 @@ async function processLocalBatch() {
     task.status = 'processing';
     renderQueue();
 
+    // ---- Step 1: Extract with AI ----
     try {
       await rateLimiter.wait();
       const json = await extractOneWithRetry(task, apiKey, platform);
@@ -1651,6 +1678,7 @@ async function processLocalBatch() {
       failed++;
     }
 
+    // ---- Step 2: Move file to target folder ----
     try {
       const targetHandle = task.status === 'success' ? localHandles.readed : localHandles.error;
       const movedName = await moveLocalFile(task, targetHandle);
@@ -1660,6 +1688,7 @@ async function processLocalBatch() {
       task.error = (task.error ? task.error + ' | ' : '') + 'Move failed: ' + moveErr.message;
     }
 
+    // ---- Step 3: Update progress ----
     done++;
     progressBar.style.width = `${(done / pending.length) * 100}%`;
     renderQueue();
@@ -1670,14 +1699,17 @@ async function processLocalBatch() {
   updateButtonState();
   updateLocalModeButtons();
 
+  // Refresh DeepSeek balance if applicable
   if (platform === 'deepseek') fetchDeepSeekBalance();
 
+  // Summary
   summaryEl.style.display = 'block';
   summaryEl.innerHTML =
     `✅ Succeeded: ${success} → moved to readed · ` +
     `❌ Failed: ${failed} → moved to error · ` +
     `Total: ${pending.length}`;
 
+  // Render results table for successful tasks
   const successTasks = queue.filter(t => t.status === 'success' && t.json);
   if (successTasks.length) {
     renderResultTable(successTasks);
