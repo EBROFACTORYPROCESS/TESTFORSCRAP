@@ -37,7 +37,6 @@ const imsUploadBtn = document.getElementById('imsUploadBtn');
 const uploadPanel = document.getElementById('uploadPanel');
 const localModePanel = document.getElementById('localModePanel');
 const localStatus = document.getElementById('localStatus');
-const localModePanel = document.getElementById('localModePanel');
 const localInputLabel = document.getElementById('localInputLabel');
 const localReadedLabel = document.getElementById('localReadedLabel');
 const localErrorLabel = document.getElementById('localErrorLabel');
