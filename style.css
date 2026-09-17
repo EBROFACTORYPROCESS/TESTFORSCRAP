@@ -735,3 +735,59 @@ table.result-table td.status-col {
 .status-light.red {
   background: radial-gradient(circle at 35% 35%, #ff9a9a, #dc3545);
 }
+/* ---------- Data Quality Score ---------- */
+.sr-score {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  border-radius: 8px;
+  background: #fff;
+  border: 1px solid #e5e5e5;
+  flex-wrap: wrap;
+}
+.sr-score .score-main {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.sr-score .score-value {
+  font-size: 32px;
+  font-weight: 800;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.sr-score .score-label {
+  font-size: 12px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.sr-score .score-detail {
+  font-size: 12px;
+  color: #666;
+  line-height: 1.5;
+}
+.sr-score .score-bar {
+  flex: 1;
+  min-width: 200px;
+  height: 8px;
+  background: #e9ecef;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.sr-score .score-bar-fill {
+  height: 100%;
+  transition: width 0.3s;
+}
+.sr-score.good { border-color: #a3cfbb; background: #f0f9f4; }
+.sr-score.good .score-value { color: #0f5132; }
+.sr-score.good .score-bar-fill { background: #217346; }
+.sr-score.warn { border-color: #ffe69c; background: #fffbf0; }
+.sr-score.warn .score-value { color: #997404; }
+.sr-score.warn .score-bar-fill { background: #f0ad4e; }
+.sr-score.bad { border-color: #f1aeb5; background: #fdf1f2; }
+.sr-score.bad .score-value { color: #842029; }
+.sr-score.bad .score-bar-fill { background: #dc3545; }
