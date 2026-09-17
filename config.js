@@ -10,7 +10,16 @@ const MAX_SIZE_STORAGE = 'max_image_size';
 const LOCAL_MODE_STORAGE = 'local_mode_enabled';
 const LOCAL_HANDLE_DB = 'ebro_fs_handles';
 const RATE_LIMIT_PER_MIN = 15;
-
+// ---- Key parameters that must be present for a form to be considered valid ----
+const KEY_PARAMETERS = [
+  { path: 'section_1.codigo_conjunto',    label: 'Código Conjunto' },
+  { path: 'section_1.codigo_rechaz',      label: 'Código Rechazo' },
+  { path: 'section_1.cantidad',           label: 'Cantidad' },
+  { path: 'section_1.origen_area_zona',   label: 'Origen Área/Zona' },
+  { path: 'section_2.fecha',              label: 'Fecha' },
+  { path: 'section_2.operario',           label: 'Operario' },
+  { path: 'signatures.encargado_linea',   label: 'Signature Encargado Línea' }
+];
 // ---- AI Platform configs ----
 const PLATFORMS = {
   gemini: {
