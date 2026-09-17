@@ -14,7 +14,7 @@
   <p class="subtitle">Choose AI platform, upload images, extract, edit, and export merged Excel.</p>
 
   <!-- =====================================================
-       Configuration Card (Platform, API Key, Model, Input Method)
+       Configuration Card
        ===================================================== -->
   <div class="card">
 
@@ -35,7 +35,7 @@
       </div>
     </div>
 
-    <!-- Gemini Model selector (only visible for Gemini) -->
+    <!-- Gemini Model selector -->
     <div class="field-row" id="geminiModelRow" style="display: none;">
       <div class="field">
         <label for="geminiModelSelect">Gemini Model</label>
@@ -44,7 +44,7 @@
       </div>
     </div>
 
-    <!-- DeepSeek Balance Panel (only visible for DeepSeek) -->
+    <!-- DeepSeek Balance Panel -->
     <div id="balancePanel">
       <div class="balance-header">
         <span class="balance-title">💳 DeepSeek Account Balance</span>
@@ -110,7 +110,7 @@
   </div>
 
   <!-- =====================================================
-       Upload Panel (visible only when upload method is selected)
+       Upload Panel — ONLY the file picker + upload buttons
        ===================================================== -->
   <div class="card input-method-panel" data-method="upload" id="uploadPanel">
     <div class="upload-area" id="uploadArea">
@@ -125,6 +125,12 @@
       <button class="btn btn-retry-all" id="retryAllBtn" disabled>🔁 Retry Failed</button>
       <button class="btn btn-clear" id="clearBtn" disabled>🗑️ Clear</button>
     </div>
+  </div>
+
+  <!-- =====================================================
+       Shared Queue View — visible in BOTH folder and upload modes
+       ===================================================== -->
+  <div class="card" id="sharedQueueCard">
     <div class="status" id="status"></div>
 
     <div class="progress-bar-wrap" id="progressWrap" style="display: none;">
@@ -147,7 +153,6 @@
 
     <div class="issues-banner" id="issuesBanner"></div>
 
-    <!-- Key Parameters Summary + Data Quality Score -->
     <div id="summaryReport" class="summary-report"></div>
 
     <div class="table-wrap">
