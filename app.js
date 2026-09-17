@@ -85,11 +85,10 @@ const zoomState = { scale: 1, naturalW: 0, naturalH: 0, fitMode: null };
   // Check browser support
   const supportsFS = typeof window.showDirectoryPicker === 'function';
   if (!supportsFS) {
-    localModeToggle.disabled = true;
-    localModeToggle.parentElement.insertAdjacentHTML(
-      'afterend',
-      '<div class="local-mode-unsupported">⚠️ Your browser does not support the File System Access API. Please use Chrome, Edge, or Opera.</div>'
-    );
+    imsFolderBtn.disabled = true;
+    imsFolderBtn.title = 'Your browser does not support the File System Access API. Use Chrome, Edge, or Opera.';
+    // Force upload mode
+    inputMethod = 'upload';
   }
 
   // Restore input method
