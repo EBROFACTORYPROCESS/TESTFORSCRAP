@@ -641,3 +641,97 @@ td.cell-category-supplier {
   font-size: 13px;
   margin-bottom: 16px;
 }
+/* ---------- Key Parameters Summary Report ---------- */
+.summary-report {
+  display: none;
+  margin-bottom: 12px;
+  padding: 14px 16px;
+  background: #f8f9fa;
+  border: 1px solid #e5e5e5;
+  border-radius: 8px;
+}
+.summary-report .sr-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #333;
+  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.summary-report .sr-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.summary-report .sr-item {
+  flex: 1 1 180px;
+  min-width: 160px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #fff;
+  border: 1px solid #e5e5e5;
+  font-size: 12px;
+}
+.summary-report .sr-item .sr-label {
+  color: #555;
+  display: block;
+  margin-bottom: 4px;
+  font-weight: 600;
+}
+.summary-report .sr-item .sr-count {
+  font-size: 18px;
+  font-weight: 700;
+}
+.summary-report .sr-item .sr-count small {
+  font-size: 11px;
+  font-weight: 400;
+  color: #888;
+  margin-left: 4px;
+}
+.summary-report .sr-item.ok {
+  background: #f0f9f4;
+  border-color: #a3cfbb;
+}
+.summary-report .sr-item.ok .sr-count { color: #0f5132; }
+.summary-report .sr-item.warn {
+  background: #fff3cd;
+  border-color: #ffe69c;
+}
+.summary-report .sr-item.warn .sr-count { color: #664d03; }
+.summary-report .sr-item.err {
+  background: #f8d7da;
+  border-color: #f1aeb5;
+}
+.summary-report .sr-item.err .sr-count { color: #842029; }
+
+/* Status light column */
+table.result-table th.status-col {
+  width: 60px;
+  text-align: center;
+  background: #f8f9fa;
+}
+table.result-table td.status-col {
+  text-align: center;
+  padding: 8px 6px;
+  background: #fafafa;
+}
+.status-light {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 2px solid rgba(0,0,0,0.15);
+  cursor: help;
+  vertical-align: middle;
+  box-shadow: 0 0 4px rgba(0,0,0,0.15);
+}
+.status-light.green {
+  background: radial-gradient(circle at 35% 35%, #7ee08a, #217346);
+}
+.status-light.yellow {
+  background: radial-gradient(circle at 35% 35%, #ffe68a, #f0ad4e);
+}
+.status-light.red {
+  background: radial-gradient(circle at 35% 35%, #ff9a9a, #dc3545);
+}
