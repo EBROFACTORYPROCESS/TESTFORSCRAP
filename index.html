@@ -17,12 +17,12 @@
 
   <div class="layout">
 
-    <!-- =====================================================
+    <!-- ============================================================
          LEFT COLUMN — Configuration
-         ===================================================== -->
+         ============================================================ -->
     <aside class="col-config">
 
-      <!-- Platform + API Key + Model -->
+      <!-- AI Configuration -->
       <div class="card">
         <h2 class="card-title">⚙️ AI Configuration</h2>
 
@@ -50,7 +50,6 @@
           <p class="hint" id="geminiModelHint"></p>
         </div>
 
-        <!-- DeepSeek balance -->
         <div id="balancePanel">
           <div class="balance-header">
             <span class="balance-title">💳 DeepSeek Balance</span>
@@ -60,7 +59,7 @@
         </div>
       </div>
 
-      <!-- Input Method + Shared settings -->
+      <!-- Input -->
       <div class="card">
         <h2 class="card-title">📥 Input</h2>
 
@@ -72,7 +71,7 @@
           <span class="local-status" id="localStatus">Not authorized</span>
         </div>
 
-        <!-- Local folder panel -->
+        <!-- Local Folder Panel -->
         <div id="localModePanel" class="input-method-panel" data-method="folder" style="display: none;">
           <div class="local-path-row">
             <label class="path-label" for="localInputLabel">Input folder</label>
@@ -104,7 +103,7 @@
           </div>
         </div>
 
-        <!-- Upload panel: only the picker + buttons -->
+        <!-- Upload Panel -->
         <div class="input-method-panel" data-method="upload" id="uploadPanel">
           <div class="upload-area" id="uploadArea">
             <div class="icon">📤</div>
@@ -122,7 +121,7 @@
           </div>
         </div>
 
-        <!-- Shared settings -->
+        <!-- Shared Settings -->
         <div class="field" style="margin-top: 14px;">
           <label for="pathPrefix">Path Prefix (prepended to <code>_file</code>)</label>
           <input type="text" id="pathPrefix" value="c/download/" placeholder="e.g. c/download/" />
@@ -137,12 +136,10 @@
 
     </aside>
 
-    <!-- =====================================================
-         RIGHT COLUMN — Content
-         ===================================================== -->
+    <!-- ============================================================
+         RIGHT COLUMN — Queue & Progress
+         ============================================================ -->
     <main class="col-content">
-
-      <!-- Shared queue view -->
       <div class="card" id="sharedQueueCard">
         <div class="status" id="status"></div>
 
@@ -154,44 +151,45 @@
 
         <div class="queue-list" id="queueList"></div>
       </div>
-
-      <!-- Extraction Results -->
-      <div class="card result-section" id="resultSection">
-        <div class="result-header">
-          <h2>✅ Extraction Results</h2>
-          <p class="hint" style="margin: 0;">Click <b>Edit</b> on any row to correct before downloading.</p>
-        </div>
-
-        <div class="issues-banner" id="issuesBanner"></div>
-
-        <div id="summaryReport" class="summary-report"></div>
-
-        <div class="table-wrap">
-          <table class="result-table" id="resultTable"></table>
-        </div>
-
-        <div class="legend">
-          <span><i class="dot dot-missing"></i> Missing</span>
-          <span><i class="dot dot-suspicious"></i> Suspicious</span>
-          <span><i class="dot dot-format"></i> Format</span>
-          <span><i class="dot dot-edited"></i> Edited</span>
-          <span><i class="dot dot-scrap"></i> Process Scrap</span>
-          <span><i class="dot dot-supplier"></i> Supplier Claim</span>
-        </div>
-
-        <div class="button-row">
-          <button class="btn btn-excel" id="downloadExcelBtn">📊 Download Merged Excel</button>
-        </div>
-      </div>
-
     </main>
 
   </div>
+
+  <!-- ============================================================
+       EXTRACTION RESULTS — Full width, below the two columns
+       ============================================================ -->
+  <div class="card result-section" id="resultSection">
+    <div class="result-header">
+      <h2>✅ Extraction Results</h2>
+      <p class="hint" style="margin: 0;">Click <b>Edit</b> on any row to correct before downloading.</p>
+    </div>
+
+    <div class="issues-banner" id="issuesBanner"></div>
+
+    <div id="summaryReport" class="summary-report"></div>
+
+    <div class="table-wrap">
+      <table class="result-table" id="resultTable"></table>
+    </div>
+
+    <div class="legend">
+      <span><i class="dot dot-missing"></i> Missing</span>
+      <span><i class="dot dot-suspicious"></i> Suspicious</span>
+      <span><i class="dot dot-format"></i> Format</span>
+      <span><i class="dot dot-edited"></i> Edited</span>
+      <span><i class="dot dot-scrap"></i> Process Scrap</span>
+      <span><i class="dot dot-supplier"></i> Supplier Claim</span>
+    </div>
+
+    <div class="button-row">
+      <button class="btn btn-excel" id="downloadExcelBtn">📊 Download Merged Excel</button>
+    </div>
+  </div>
 </div>
 
-<!-- =====================================================
-     Edit Modal (unchanged)
-     ===================================================== -->
+<!-- ============================================================
+     Edit Modal
+     ============================================================ -->
 <div class="modal-overlay" id="modalOverlay">
   <div class="modal">
     <div class="modal-header">
