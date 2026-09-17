@@ -92,13 +92,14 @@ const zoomState = { scale: 1, naturalW: 0, naturalH: 0, fitMode: null };
     );
   }
 
-  // Restore local mode toggle
-  const savedLocalMode = localStorage.getItem(LOCAL_MODE_STORAGE) === '1';
-  if (savedLocalMode && supportsFS) {
-    localModeToggle.checked = true;
-    localMode = true;
-    localModePanel.style.display = 'block';
+  // Restore input method
+  const savedMethod = localStorage.getItem(INPUT_METHOD_STORAGE);
+  if (savedMethod === 'folder' || savedMethod === 'upload') {
+    inputMethod = savedMethod;
+  } else {
+    inputMethod = supportsFS ? 'folder' : 'upload';
   }
+  applyInputMethod(inputMethod);
 
   // Restore saved handles from IndexedDB
   await restoreLocalHandles();
