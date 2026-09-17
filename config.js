@@ -9,6 +9,7 @@ const PATH_PREFIX_STORAGE = 'source_path_prefix';
 const MAX_SIZE_STORAGE = 'max_image_size';
 const LOCAL_MODE_STORAGE = 'local_mode_enabled';
 const LOCAL_HANDLE_DB = 'ebro_fs_handles';
+const INPUT_METHOD_STORAGE = 'input_method'; // 'folder' | 'upload'
 const RATE_LIMIT_PER_MIN = 15;
 // ---- Key parameters that must be present for a form to be considered valid ----
 const KEY_PARAMETERS = [
