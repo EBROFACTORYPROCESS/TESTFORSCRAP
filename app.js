@@ -68,6 +68,8 @@ let isRunning = false;
 let idCounter = 0;
 let editingTaskId = null;
 let editingDraft = null;
+let localMode = false;
+let localHandles = { input: null, readed: null, error: null };
 
 const zoomState = { scale: 1, naturalW: 0, naturalH: 0, fitMode: null };
 
@@ -76,7 +78,27 @@ const zoomState = { scale: 1, naturalW: 0, naturalH: 0, fitMode: null };
 // ============================================================
 (async function init() {
   await loadFieldSchemaFromJson();
+  
+  // Check browser support
+  const supportsFS = typeof window.showDirectoryPicker === 'function';
+  if (!supportsFS) {
+    localModeToggle.disabled = true;
+    localModeToggle.parentElement.insertAdjacentHTML(
+      'afterend',
+      '<div class="local-mode-unsupported">⚠️ Your browser does not support the File System Access API. Please use Chrome, Edge, or Opera.</div>'
+    );
+  }
 
+  // Restore local mode toggle
+  const savedLocalMode = localStorage.getItem(LOCAL_MODE_STORAGE) === '1';
+  if (savedLocalMode && supportsFS) {
+    localModeToggle.checked = true;
+    localMode = true;
+    localModePanel.style.display = 'block';
+  }
+
+  // Restore saved handles from IndexedDB
+  await restoreLocalHandles();
   const savedPlatform = localStorage.getItem(PLATFORM_STORAGE);
   if (savedPlatform && PLATFORMS[savedPlatform]) {
     platformSelect.value = savedPlatform;
@@ -194,6 +216,22 @@ function attachEventListeners() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && modalOverlay.classList.contains('open')) closeEditModal();
   });
+    // Local mode
+  if (typeof window.showDirectoryPicker === 'function') {
+    localModeToggle.addEventListener('change', () => {
+      localMode = localModeToggle.checked;
+      localStorage.setItem(LOCAL_MODE_STORAGE, localMode ? '1' : '0');
+      localModePanel.style.display = localMode ? 'block' : 'none';
+      updateLocalModeButtons();
+    });
+
+    localPickInputBtn.addEventListener('click', () => pickLocalFolder('input'));
+    localPickReadedBtn.addEventListener('click', () => pickLocalFolder('readed'));
+    localPickErrorBtn.addEventListener('click', () => pickLocalFolder('error'));
+
+    localLoadBtn.addEventListener('click', loadLocalFiles);
+    localProcessBtn.addEventListener('click', processLocalBatch);
+  }
 }
 
 // ============================================================
@@ -1355,4 +1393,368 @@ function onDownloadExcel() {
     (editedCount ? ` (${editedCount} with manual edits).` : '.'),
     'success'
   );
+  // ============================================================
+  //  Local Folder Mode (File System Access API)
+  //  No Node.js required. Works in Chrome / Edge / Opera.
+  // ============================================================
+  
+  // ---- IndexedDB helpers for persisting directory handles ----
+  function idbOpen() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(LOCAL_HANDLE_DB, 1);
+      req.onupgradeneeded = () => {
+        req.result.createObjectStore('handles');
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  
+  async function idbSet(key, value) {
+    const db = await idbOpen();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('handles', 'readwrite');
+      tx.objectStore('handles').put(value, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+  
+  async function idbGet(key) {
+    const db = await idbOpen();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('handles', 'readonly');
+      const req = tx.objectStore('handles').get(key);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+  
+  async function idbDelete(key) {
+    const db = await idbOpen();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction('handles', 'readwrite');
+      tx.objectStore('handles').delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  }
+  
+  // ---- Verify permission on a stored handle ----
+  async function verifyHandlePermission(handle) {
+    if (!handle) return false;
+    const opts = { mode: 'readwrite' };
+    if (await handle.queryPermission(opts) === 'granted') return true;
+    if (await handle.requestPermission(opts) === 'granted') return true;
+    return false;
+  }
+  
+  // ---- Restore saved handles on page load ----
+  async function restoreLocalHandles() {
+    if (typeof window.showDirectoryPicker !== 'function') return;
+  
+    for (const key of ['input', 'readed', 'error']) {
+      try {
+        const handle = await idbGet(key);
+        if (handle) {
+          localHandles[key] = handle;
+          updateLocalFolderLabel(key, handle.name, false);
+        }
+      } catch (e) {
+        console.warn('Failed to restore handle', key, e);
+      }
+    }
+    updateLocalModeButtons();
+  }
+  
+  // ---- Pick a folder ----
+  async function pickLocalFolder(key) {
+    try {
+      const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+      localHandles[key] = handle;
+      await idbSet(key, handle);
+      updateLocalFolderLabel(key, handle.name, true);
+      updateLocalModeButtons();
+      localStatus.textContent = `✅ ${key} folder: ${handle.name}`;
+      localStatus.className = 'local-status connected';
+    } catch (err) {
+      if (err.name === 'AbortError') return; // user cancelled
+      console.error('pickLocalFolder error:', err);
+      localStatus.textContent = `❌ ${err.message}`;
+      localStatus.className = 'local-status error';
+    }
+  }
+  
+  // ---- Update the label + button color ----
+  function updateLocalFolderLabel(key, name, authorized) {
+    const labelMap = {
+      input: localInputLabel,
+      readed: localReadedLabel,
+      error: localErrorLabel
+    };
+    const btnMap = {
+      input: localPickInputBtn,
+      readed: localPickReadedBtn,
+      error: localPickErrorBtn
+    };
+    labelMap[key].value = name || '';
+    if (authorized) btnMap[key].classList.add('authorized');
+  }
+  
+  // ---- Enable/disable buttons based on state ----
+  function updateLocalModeButtons() {
+    if (typeof window.showDirectoryPicker !== 'function') return;
+    const hasInput = !!localHandles.input;
+    const hasReaded = !!localHandles.readed;
+    const hasError = !!localHandles.error;
+    localLoadBtn.disabled = !localMode || !hasInput;
+    localProcessBtn.disabled = !localMode || !hasReaded || !hasError || queue.length === 0;
+  }
+  
+  // ---- List all image files in the input folder ----
+  async function loadLocalFiles() {
+    if (!localHandles.input) {
+      localStatus.textContent = '❌ Please select the input folder first.';
+      localStatus.className = 'local-status error';
+      return;
+    }
+  
+    try {
+      // Re-verify permission (in case user denied it earlier)
+      const ok = await verifyHandlePermission(localHandles.input);
+      if (!ok) {
+        localStatus.textContent = '❌ Permission denied for input folder.';
+        localStatus.className = 'local-status error';
+        return;
+      }
+  
+      localStatus.textContent = 'Reading folder...';
+      localStatus.className = 'local-status';
+  
+      const imageExts = ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.tif', '.tiff'];
+      const files = [];
+  
+      for await (const [name, handle] of localHandles.input.entries()) {
+        if (handle.kind !== 'file') continue;
+        const lower = name.toLowerCase();
+        if (!imageExts.some(ext => lower.endsWith(ext))) continue;
+        const file = await handle.getFile();
+        files.push({ name, handle, file, size: file.size, mtime: file.lastModified });
+      }
+  
+      if (!files.length) {
+        localStatus.textContent = '⚠️ No image files found in the input folder.';
+        localStatus.className = 'local-status error';
+        return;
+      }
+  
+      // Reset queue
+      queue = [];
+      idCounter = 0;
+  
+      // Read each file as data URL for preview + processing
+      localStatus.textContent = `Loading ${files.length} file(s)...`;
+  
+      for (const f of files) {
+        const dataUrl = await fileToDataUrl(f.file);
+        const task = {
+          id: ++idCounter,
+          file: f.file,
+          previewUrl: dataUrl,
+          status: 'waiting',
+          json: null,
+          originalJson: null,
+          edited: false,
+          error: null,
+          // Local mode fields
+          localHandle: f.handle,
+          localName: f.name,
+          // These are set later if we compress
+          resizedBlob: null,
+          resizedDataUrl: null,
+          resizeInfo: null
+        };
+        queue.push(task);
+      }
+  
+      renderQueue();
+      updateButtonState();
+      updateLocalModeButtons();
+  
+      localStatus.textContent = `✅ Loaded ${queue.length} image(s) from "${localHandles.input.name}"`;
+      localStatus.className = 'local-status connected';
+    } catch (err) {
+      console.error('loadLocalFiles error:', err);
+      localStatus.textContent = `❌ ${err.message}`;
+      localStatus.className = 'local-status error';
+    }
+  }
+  
+  function fileToDataUrl(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+  
+  // ---- Process all pending files and move them ----
+  async function processLocalBatch() {
+    if (isRunning) return;
+    const apiKey = apiKeyInput.value.trim();
+    if (!apiKey) {
+      showStatus('Please enter your API Key first.', 'error');
+      return;
+    }
+    if (!localHandles.readed || !localHandles.error) {
+      showStatus('Please select both readed and error folders first.', 'error');
+      return;
+    }
+  
+    const pending = queue.filter(t => t.status === 'waiting');
+    if (!pending.length) {
+      showStatus('No pending files to process.', 'error');
+      return;
+    }
+  
+    // Verify permissions
+    const okReaded = await verifyHandlePermission(localHandles.readed);
+    const okError = await verifyHandlePermission(localHandles.error);
+    if (!okReaded || !okError) {
+      showStatus('Permission denied for target folders. Please re-select them.', 'error');
+      return;
+    }
+  
+    isRunning = true;
+    updateButtonState();
+    updateLocalModeButtons();
+    resultSection.style.display = 'none';
+    progressWrap.style.display = 'block';
+    summaryEl.style.display = 'none';
+  
+    const platform = getCurrentPlatform();
+    let done = 0, success = 0, failed = 0;
+  
+    for (const task of pending) {
+      if (task.status === 'cancelled') continue;
+      task.status = 'processing';
+      renderQueue();
+  
+      try {
+        await rateLimiter.wait();
+        const json = await extractOneWithRetry(task, apiKey, platform);
+        task.json = json;
+        task.originalJson = JSON.parse(JSON.stringify(json));
+        task.status = 'success';
+        task.error = null;
+        success++;
+      } catch (err) {
+        console.error(task.file.name, err);
+        task.error = err.message || 'Unknown error';
+        task.status = 'error';
+        failed++;
+      }
+  
+      // Move the file to the appropriate target folder
+      try {
+        const targetHandle = task.status === 'success' ? localHandles.readed : localHandles.error;
+        const movedName = await moveLocalFile(task, targetHandle);
+        task.movedTo = movedName;
+      } catch (moveErr) {
+        console.error('Move failed:', task.localName, moveErr);
+        task.error = (task.error ? task.error + ' | ' : '') + 'Move failed: ' + moveErr.message;
+      }
+  
+      done++;
+      progressBar.style.width = `${(done / pending.length) * 100}%`;
+      renderQueue();
+      updateButtonState();
+    }
+  
+    isRunning = false;
+    updateButtonState();
+    updateLocalModeButtons();
+  
+    if (platform === 'deepseek') fetchDeepSeekBalance();
+  
+    summaryEl.style.display = 'block';
+    summaryEl.innerHTML =
+      `✅ Succeeded: ${success} → moved to readed · ` +
+      `❌ Failed: ${failed} → moved to error · ` +
+      `Total: ${pending.length}`;
+  
+    const successTasks = queue.filter(t => t.status === 'success' && t.json);
+    if (successTasks.length) {
+      renderResultTable(successTasks);
+      resultSection.style.display = 'block';
+    }
+  
+    showStatus(
+      `🎉 Done. ${success} succeeded, ${failed} failed. Files have been moved.`,
+      success ? 'success' : 'error'
+    );
+  }
+  
+  // ---- Move a file using File System Access API ----
+  async function moveLocalFile(task, targetDirHandle) {
+    if (!task.localHandle || !task.localName) {
+      throw new Error('Missing local handle');
+    }
+  
+    // Handle name collision by appending a timestamp
+    let finalName = task.localName;
+    let destFileHandle;
+    let attempts = 0;
+    while (attempts < 3) {
+      try {
+        destFileHandle = await targetDirHandle.getFileHandle(finalName, { create: false });
+        // If we get here, the file already exists → rename
+        const dot = finalName.lastIndexOf('.');
+        const base = dot > 0 ? finalName.slice(0, dot) : finalName;
+        const ext = dot > 0 ? finalName.slice(dot) : '';
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        finalName = `${base}_${ts}${ext}`;
+        attempts++;
+      } catch (e) {
+        // File does not exist → good, we can use this name
+        break;
+      }
+    }
+  
+    // File System Access API doesn't have a native cross-handle "move".
+    // We create the destination file, copy the content, then remove the source.
+    const sourceFile = await task.localHandle.getFile();
+    const destHandle = await targetDirHandle.getFileHandle(finalName, { create: true });
+    const writable = await destHandle.createWritable();
+    await writable.write(sourceFile);
+    await writable.close();
+  
+    // Delete the source
+    await task.localHandle.remove();
+  
+    return finalName;
+  }
+  
+  // ---- Override queue rendering to also show the moved destination ----
+  // We patch renderQueue here instead of modifying the original, so that
+  // both manual and local modes keep working.
+  const _originalRenderQueue = renderQueue;
+  renderQueue = function() {
+    _originalRenderQueue();
+    // Add moved destination info to each queue item
+    const items = queueList.querySelectorAll('.queue-item');
+    items.forEach((el, idx) => {
+      const task = queue[idx];
+      if (!task || !task.movedTo) return;
+      const info = el.querySelector('.info');
+      if (info) {
+        const moved = document.createElement('div');
+        moved.className = 'meta';
+        moved.style.color = '#0f5132';
+        moved.textContent = `📁 Moved → ${task.movedTo}`;
+        info.appendChild(moved);
+      }
+    });
+  };
 }
