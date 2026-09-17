@@ -31,6 +31,7 @@ const downloadExcelBtn = document.getElementById('downloadExcelBtn');
 const geminiModelRow = document.getElementById('geminiModelRow');
 const geminiModelSelect = document.getElementById('geminiModelSelect');
 const geminiModelHint = document.getElementById('geminiModelHint');
+
 // Local mode elements
 const imsFolderBtn = document.getElementById('imsFolderBtn');
 const imsUploadBtn = document.getElementById('imsUploadBtn');
@@ -80,14 +81,12 @@ const zoomState = { scale: 1, naturalW: 0, naturalH: 0, fitMode: null };
 // ============================================================
 (async function init() {
   await loadFieldSchemaFromJson();
-  
-  // Check browser support
+
+  // Check browser support for File System Access API
   const supportsFS = typeof window.showDirectoryPicker === 'function';
   if (!supportsFS) {
     imsFolderBtn.disabled = true;
     imsFolderBtn.title = 'Your browser does not support the File System Access API. Use Chrome, Edge, or Opera.';
-    // Force upload mode
-    inputMethod = 'upload';
   }
 
   // Restore input method
@@ -101,6 +100,7 @@ const zoomState = { scale: 1, naturalW: 0, naturalH: 0, fitMode: null };
 
   // Restore saved handles from IndexedDB
   await restoreLocalHandles();
+
   const savedPlatform = localStorage.getItem(PLATFORM_STORAGE);
   if (savedPlatform && PLATFORMS[savedPlatform]) {
     platformSelect.value = savedPlatform;
@@ -122,13 +122,13 @@ function attachEventListeners() {
     localStorage.setItem(PLATFORM_STORAGE, platformSelect.value);
     updatePlatformUI();
   });
-  
+
   geminiModelSelect.addEventListener('change', () => {
     localStorage.setItem(GEMINI_MODEL_STORAGE, geminiModelSelect.value);
     updateGeminiModelHint();
-    updatePlatformUI(); // refresh platformHint with the new model name
+    updatePlatformUI();
   });
-  
+
   apiKeyInput.addEventListener('input', () => {
     const platform = getCurrentPlatform();
     localStorage.setItem(getKeyStorageKey(platform), apiKeyInput.value.trim());
@@ -218,7 +218,7 @@ function attachEventListeners() {
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape' && modalOverlay.classList.contains('open')) closeEditModal();
   });
-    // Local mode
+
   // Input method selector
   imsFolderBtn.addEventListener('click', () => switchInputMethod('folder'));
   imsUploadBtn.addEventListener('click', () => switchInputMethod('upload'));
@@ -239,11 +239,10 @@ function attachEventListeners() {
 // ============================================================
 function getCurrentPlatform() { return platformSelect.value; }
 function getKeyStorageKey(platform) { return API_KEY_STORAGE_PREFIX + platform; }
-// ---- Gemini model selection ----
+
 function getCurrentGeminiModel() {
   const stored = localStorage.getItem(GEMINI_MODEL_STORAGE);
   const models = PLATFORMS.gemini.models || [];
-  // If stored value is valid, use it. Otherwise fall back to default.
   if (stored && models.some(m => m.id === stored)) return stored;
   return PLATFORMS.gemini.defaultModel;
 }
@@ -277,15 +276,14 @@ function updatePlatformUI() {
   platformHint.textContent = `Model: ${platform === 'gemini' ? getCurrentGeminiModel() : cfg.defaultModel}`;
 
   balancePanel.style.display = (platform === 'deepseek') ? 'block' : 'none';
-  
-  // Gemini model row only for Gemini
+
   if (platform === 'gemini') {
     geminiModelRow.style.display = 'flex';
     buildGeminiModelDropdown();
   } else {
     geminiModelRow.style.display = 'none';
   }
-  
+
   const stored = localStorage.getItem(getKeyStorageKey(platform));
   apiKeyInput.value = stored || '';
   updateButtonState();
@@ -354,7 +352,7 @@ function renderDeepSeekBalance(data) {
       <span class="value">${symbol}${info.total_balance}</span>
     </div>
     <div class="balance-row sub">
-      <span class="label">Granted (promotional):</span>
+      <span class="label">Granted (promo):</span>
       <span class="value">${symbol}${info.granted_balance}</span>
     </div>
     <div class="balance-row sub">
@@ -367,47 +365,31 @@ function renderDeepSeekBalance(data) {
     </div>
   `;
 }
-/**
- * Read the EXIF orientation value from a JPEG File.
- * Returns 1 if not found or not a JPEG.
- *
- * Values:
- *   1 = normal
- *   2 = flip horizontal
- *   3 = rotate 180
- *   4 = flip vertical
- *   5 = rotate 90 CW + flip horizontal
- *   6 = rotate 90 CW
- *   7 = rotate 90 CCW + flip horizontal
- *   8 = rotate 90 CCW
- */
+
+// ============================================================
+//  Image helpers (EXIF orientation + resize)
+// ============================================================
 async function readExifOrientation(file) {
   try {
-    // Only JPEG supports this EXIF tag
     if (!/image\/jpe?g/i.test(file.type)) return 1;
-
-    const buf = await file.slice(0, 128 * 1024).arrayBuffer(); // read first 128 KB
+    const buf = await file.slice(0, 128 * 1024).arrayBuffer();
     const view = new DataView(buf);
-
-    // Check JPEG magic bytes
     if (view.getUint16(0, false) !== 0xFFD8) return 1;
 
     const length = view.byteLength;
     let offset = 2;
 
     while (offset < length) {
-      if (view.getUint16(offset, false) === 0xFFE1) { // APP1
+      if (view.getUint16(offset, false) === 0xFFE1) {
         offset += 2;
         const exifHeader = view.getUint32(offset, false);
-        // "Exif" = 0x45786966
         if (exifHeader !== 0x45786966) return 1;
 
-        offset += 6; // skip "Exif\0\0"
+        offset += 6;
         const tiffStart = offset;
         const bigEndian = view.getUint16(tiffStart, false) === 0x4D4D;
-        const endian = bigEndian ? false : true;
+        const endian = !bigEndian;
 
-        // Check TIFF magic
         if (view.getUint16(tiffStart + 2, endian) !== 0x002A) return 1;
 
         const ifdOffset = view.getUint32(tiffStart + 4, endian);
@@ -417,7 +399,7 @@ async function readExifOrientation(file) {
         for (let i = 0; i < entries; i++) {
           const entryOffset = dirStart + 2 + i * 12;
           const tag = view.getUint16(entryOffset, endian);
-          if (tag === 0x0112) { // Orientation
+          if (tag === 0x0112) {
             return view.getUint16(entryOffset + 8, endian);
           }
         }
@@ -432,64 +414,14 @@ async function readExifOrientation(file) {
   }
 }
 
-/**
- * Load an image file, apply EXIF orientation, and return an HTMLImageElement
- * that is already correctly oriented.
- */
-async function loadImageOriented(file) {
-  const orientation = await readExifOrientation(file);
-  const img = await loadImage(file); // existing helper
-
-  // If orientation is normal (1) or unsupported, return as-is
-  if (orientation === 1) return { img, orientation };
-
-  // Create a canvas, apply the transform, return the transformed image
-  const canvas = document.createElement('canvas');
-  const ctx = canvas.getContext('2d');
-
-  // Determine output dimensions based on orientation
-  const swap = orientation >= 5 && orientation <= 8;
-  canvas.width = swap ? img.height : img.width;
-  canvas.height = swap ? img.width : img.height;
-
-  switch (orientation) {
-    case 2: // flip horizontal
-      ctx.translate(canvas.width, 0);
-      ctx.scale(-1, 1);
-      break;
-    case 3: // rotate 180
-      ctx.translate(canvas.width, canvas.height);
-      ctx.rotate(Math.PI);
-      break;
-    case 4: // flip vertical
-      ctx.translate(0, canvas.height);
-      ctx.scale(1, -1);
-      break;
-    case 5: // rotate 90 CW + flip horizontal
-      ctx.translate(canvas.width, 0);
-      ctx.rotate(Math.PI / 2);
-      ctx.scale(-1, 1);
-      break;
-    case 6: // rotate 90 CW
-      ctx.translate(canvas.width, 0);
-      ctx.rotate(Math.PI / 2);
-      break;
-    case 7: // rotate 90 CCW + flip horizontal
-      ctx.translate(0, canvas.height);
-      ctx.rotate(-Math.PI / 2);
-      ctx.scale(-1, 1);
-      break;
-    case 8: // rotate 90 CCW
-      ctx.translate(0, canvas.height);
-      ctx.rotate(-Math.PI / 2);
-      break;
-  }
-
-  ctx.drawImage(img, 0, 0);
-
-  // Convert canvas back to an Image element
-  const orientedImg = await canvasToImage(canvas);
-  return { img: orientedImg, orientation };
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Failed to load image')); };
+    img.src = url;
+  });
 }
 
 function canvasToImage(canvas) {
@@ -504,23 +436,63 @@ function canvasToImage(canvas) {
     }, 'image/jpeg', 0.95);
   });
 }
-// ============================================================
-//  Upload / resize
-// ============================================================
+
+async function loadImageOriented(file) {
+  const orientation = await readExifOrientation(file);
+  const img = await loadImage(file);
+
+  if (orientation === 1) return { img, orientation };
+
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+
+  const swap = orientation >= 5 && orientation <= 8;
+  canvas.width = swap ? img.height : img.width;
+  canvas.height = swap ? img.width : img.height;
+
+  switch (orientation) {
+    case 2:
+      ctx.translate(canvas.width, 0);
+      ctx.scale(-1, 1);
+      break;
+    case 3:
+      ctx.translate(canvas.width, canvas.height);
+      ctx.rotate(Math.PI);
+      break;
+    case 4:
+      ctx.translate(0, canvas.height);
+      ctx.scale(1, -1);
+      break;
+    case 5:
+      ctx.translate(canvas.width, 0);
+      ctx.rotate(Math.PI / 2);
+      ctx.scale(-1, 1);
+      break;
+    case 6:
+      ctx.translate(canvas.width, 0);
+      ctx.rotate(Math.PI / 2);
+      break;
+    case 7:
+      ctx.translate(0, canvas.height);
+      ctx.rotate(-Math.PI / 2);
+      ctx.scale(-1, 1);
+      break;
+    case 8:
+      ctx.translate(0, canvas.height);
+      ctx.rotate(-Math.PI / 2);
+      break;
+  }
+
+  ctx.drawImage(img, 0, 0);
+
+  const orientedImg = await canvasToImage(canvas);
+  return { img: orientedImg, orientation };
+}
+
 function getMaxSize() {
   const v = parseInt(maxSizeInput.value, 10);
   if (!v || v < 200) return 1600;
   return v;
-}
-
-function loadImage(file) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(file);
-    const img = new Image();
-    img.onload = () => { URL.revokeObjectURL(url); resolve(img); };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Failed to load image')); };
-    img.src = url;
-  });
 }
 
 async function resizeImage(file) {
@@ -550,7 +522,7 @@ async function resizeImage(file) {
     originalSize: file.size,
     resizedSize: blob ? blob.size : 0,
     dataUrl: canvas.toDataURL('image/jpeg', 0.85),
-    orientation  // ← 新增
+    orientation
   };
 }
 
@@ -628,6 +600,8 @@ function renderQueue() {
       ? `<div class="meta" style="color:#b02a37;">${escapeHtml(task.error)}</div>` : '';
     const editedLine = task.edited
       ? `<div class="meta" style="color:#217346;">✏️ Manually edited</div>` : '';
+    const movedLine = task.movedTo
+      ? `<div class="meta" style="color:#0f5132;">📁 Moved → ${escapeHtml(task.movedTo)}</div>` : '';
     const retryBtn = task.status === 'error'
       ? `<button class="btn btn-retry" data-retry-id="${task.id}">🔁 Retry</button>` : '';
 
@@ -638,6 +612,7 @@ function renderQueue() {
         <div class="meta">${escapeHtml(sizeInfo)}</div>
         ${errorLine}
         ${editedLine}
+        ${movedLine}
       </div>
       <span class="state state-${task.status}">${statusLabel(task.status)}</span>
       ${retryBtn}
@@ -783,15 +758,14 @@ async function retryOne(id) {
   updateButtonState();
   updateLocalModeButtons();
 
-  // ---- Step 1: If the file was already moved to error/, pull it back to input/ ----
-  if (localMode && task.currentLocation === 'error' && task.movedTo) {
+  // Pull file back from error/ if needed
+  if (inputMethod === 'folder' && task.currentLocation === 'error' && task.movedTo) {
     try {
       const pulledBack = await pullFileBackFromFolder(
         localHandles.error,
         localHandles.input,
         task.movedTo
       );
-      // Update task to reflect the file is now back in input
       task.localHandle = pulledBack.handle;
       task.localName = pulledBack.name;
       task.movedTo = null;
@@ -817,7 +791,6 @@ async function retryOne(id) {
 
   const platform = getCurrentPlatform();
 
-  // ---- Step 2: Retry AI extraction ----
   try {
     await rateLimiter.wait();
     const json = await extractOneWithRetry(task, apiKey, platform);
@@ -832,8 +805,8 @@ async function retryOne(id) {
     task.status = 'error';
   }
 
-  // ---- Step 3: Move the file based on the new outcome (local mode only) ----
-  if (localMode && task.localHandle && task.localName) {
+  // Move file based on new outcome
+  if (inputMethod === 'folder' && task.localHandle && task.localName) {
     try {
       const targetHandle = task.status === 'success' ? localHandles.readed : localHandles.error;
       const movedName = await moveLocalFile(task, targetHandle);
@@ -859,14 +832,12 @@ async function retryOne(id) {
     task.status === 'success' ? 'success' : 'error'
   );
 
-  // Refresh result table
   const successTasks = queue.filter(t => t.status === 'success' && t.json);
   if (successTasks.length) {
     renderResultTable(successTasks);
     resultSection.style.display = 'block';
   }
 
-  // Refresh summary
   const successCount = queue.filter(t => t.status === 'success').length;
   const failedCount = queue.filter(t => t.status === 'error').length;
   const pendingCount = queue.filter(t => t.status === 'waiting').length;
@@ -894,12 +865,34 @@ function onClearClick() {
   updateButtonState();
 }
 
+/**
+ * Build the `_file` value for manual upload mode.
+ * Uses the Source Path Prefix.
+ */
 function buildFilePath(file) {
   const rawPrefix = pathPrefixInput.value || '';
   const prefix = rawPrefix.replace(/\\/g, '/').replace(/\/+$/, '');
   if (prefix) return `${prefix}/${file.name}`;
   if (file.webkitRelativePath) return file.webkitRelativePath.replace(/\\/g, '/');
   return file.name;
+}
+
+/**
+ * Build the `_file` value for a task.
+ * In Local Folder mode, reflects where the file was moved (readed/ or error/).
+ * In Upload mode, uses buildFilePath().
+ */
+function buildFilePathForTask(task) {
+  if (inputMethod === 'folder' && task && task.movedTo) {
+    const destFolder = task.currentLocation || (task.status === 'success' ? 'readed' : 'error');
+    return `${destFolder}/${task.movedTo}`;
+  }
+
+  if (inputMethod === 'folder' && task && task.localName) {
+    return `input/${task.localName}`;
+  }
+
+  return buildFilePath(task.file);
 }
 
 // ============================================================
@@ -950,7 +943,7 @@ async function callAI(task, apiKey, platform) {
 async function callGemini({ base64, mimeType, prompt, apiKey }) {
   const cfg = PLATFORMS.gemini;
   const modelId = getCurrentGeminiModel();
-  const url = `${cfg.endpoint(modelId)}?key=${apiKey}`; 
+  const url = `${cfg.endpoint(modelId)}?key=${apiKey}`;
 
   let response;
   try {
@@ -1147,7 +1140,7 @@ function blobToBase64(blob) {
 }
 
 // ============================================================
-//  Result table
+//  Result table + Key parameter summary + Quality score
 // ============================================================
 function flattenJson(obj) {
   const flat = {};
@@ -1175,29 +1168,17 @@ function evaluateCell(value) {
   if (/^[\-_.·]+$/.test(s)) return 'suspicious';
   return 'ok';
 }
-/**
- * Check if a value is considered "missing" for a given path.
- * Signature fields treat "Not Signed" as missing.
- */
+
 function isValueMissing(path, value) {
   if (value === null || value === undefined) return true;
   const s = String(value).trim();
   if (s === '') return true;
-
-  // Signature fields: "Not Signed" counts as missing
   if (path.startsWith('signatures.')) {
     return !/^Signed$/i.test(s);
   }
-
   return false;
 }
 
-/**
- * Build the summary of key parameters across all tasks.
- * Returns { keyStats, statuses }
- *   keyStats: { [path]: { label, missingCount, total } }
- *   statuses: { [taskId]: { level: 'green'|'yellow'|'red', reasons: [] } }
- */
 function buildKeyParameterSummary(tasks) {
   const keyStats = {};
   KEY_PARAMETERS.forEach(kp => {
@@ -1213,11 +1194,8 @@ function buildKeyParameterSummary(tasks) {
     let otherMissing = 0;
     let otherFormatIssue = 0;
 
-    // Walk every flattened field and classify
     Object.keys(flat).forEach(path => {
       const value = flat[path];
-
-      // Skip internal fields
       if (path === '_file' || path === '_taskId' || path === '_edited') return;
 
       const isKey = KEY_PARAMETERS.some(kp => kp.path === path);
@@ -1235,11 +1213,9 @@ function buildKeyParameterSummary(tasks) {
         return;
       }
 
-      // Format check
       const fStatus = checkFormat(path, value);
       if (fStatus === 'format-mismatch') {
         if (isKey) {
-          // Format issue on a key parameter → also counts toward red
           keyMissing++;
           const label = KEY_PARAMETERS.find(kp => kp.path === path)?.label || path;
           reasons.push(`Invalid format on key parameter: ${label}`);
@@ -1251,13 +1227,9 @@ function buildKeyParameterSummary(tasks) {
       }
     });
 
-    // Decide status level
     let level = 'green';
-    if (keyMissing > 0) {
-      level = 'red';
-    } else if (otherMissing > 0 || otherFormatIssue > 0) {
-      level = 'yellow';
-    }
+    if (keyMissing > 0) level = 'red';
+    else if (otherMissing > 0 || otherFormatIssue > 0) level = 'yellow';
 
     statuses[task.id] = { level, reasons };
   });
@@ -1265,41 +1237,18 @@ function buildKeyParameterSummary(tasks) {
   return { keyStats, statuses };
 }
 
-
-/**
- * Compute a 0-100 data quality score based on:
- *   - Key parameters (70% weight)
- *   - Other fields  (30% weight)
- *
- * Returns:
- * {
- *   score: number (0-100, one decimal),
- *   keyPresent: number,
- *   keyTotal: number,
- *   otherPresent: number,
- *   otherTotal: number,
- *   level: 'good' | 'warn' | 'bad'
- * }
- */
 function computeQualityScore(tasks) {
-  let keyPresent = 0;
-  let keyTotal = 0;
-  let otherPresent = 0;
-  let otherTotal = 0;
-
+  let keyPresent = 0, keyTotal = 0;
+  let otherPresent = 0, otherTotal = 0;
   const keyPathSet = new Set(KEY_PARAMETERS.map(kp => kp.path));
 
   tasks.forEach(task => {
     const flat = flattenJson(task.json || {});
-
     Object.keys(flat).forEach(path => {
-      // Skip internal fields
       if (path === '_file' || path === '_taskId' || path === '_edited') return;
-
       const value = flat[path];
       const missing = isValueMissing(path, value);
       const isKey = keyPathSet.has(path);
-
       if (isKey) {
         keyTotal++;
         if (!missing) keyPresent++;
@@ -1313,35 +1262,19 @@ function computeQualityScore(tasks) {
   const keyRatio = keyTotal > 0 ? keyPresent / keyTotal : 1;
   const otherRatio = otherTotal > 0 ? otherPresent / otherTotal : 1;
   const raw = keyRatio * 0.7 + otherRatio * 0.3;
-  const score = Math.round(raw * 1000) / 10; // one decimal
+  const score = Math.round(raw * 1000) / 10;
 
   let level = 'bad';
   if (score >= 90) level = 'good';
   else if (score >= 70) level = 'warn';
 
-  return {
-    score,
-    keyPresent,
-    keyTotal,
-    otherPresent,
-    otherTotal,
-    level
-  };
+  return { score, keyPresent, keyTotal, otherPresent, otherTotal, level };
 }
 
-
-/**
- * Render the summary report at the top of the results section.
- */
-/**
- * Render the summary report at the top of the results section.
- * Now includes a data quality score.
- */
 function renderSummaryReport(keyStats, totalRows, tasks) {
   const container = document.getElementById('summaryReport');
   if (!container) return;
 
-  // ---- Quality score ----
   const quality = computeQualityScore(tasks);
 
   const scoreHTML = `
@@ -1360,15 +1293,12 @@ function renderSummaryReport(keyStats, totalRows, tasks) {
     </div>
   `;
 
-  // ---- Key parameter items ----
   const items = KEY_PARAMETERS.map(kp => {
     const stat = keyStats[kp.path];
     const missing = stat.missingCount;
     const present = stat.total - missing;
     let cls = 'ok';
-    if (missing > 0) {
-      cls = missing === stat.total ? 'err' : 'warn';
-    }
+    if (missing > 0) cls = missing === stat.total ? 'err' : 'warn';
     const countDisplay = missing === 0
       ? `${present}/${stat.total}`
       : `${missing} missing`;
@@ -1389,12 +1319,12 @@ function renderSummaryReport(keyStats, totalRows, tasks) {
 }
 
 function renderResultTable(tasks) {
-  // ---- Build key parameter summary ----
   const { keyStats, statuses } = buildKeyParameterSummary(tasks);
   renderSummaryReport(keyStats, tasks.length, tasks);
+
   const rows = tasks.map(t => ({
     _taskId: t.id,
-    _file: buildFilePath(t.file),
+    _file: buildFilePathForTask(t),
     _edited: !!t.edited,
     ...flattenJson(t.json)
   }));
@@ -1412,7 +1342,7 @@ function renderResultTable(tasks) {
   const headTr = document.createElement('tr');
   headTr.innerHTML =
     `<th class="row-num">#</th>` +
-    `<th class="status-col" title="Row status: green = all good, yellow = non-key fields missing, red = key parameters missing">●</th>` +    
+    `<th class="status-col" title="Row status: green = all good, yellow = non-key fields missing, red = key parameters missing">●</th>` +
     headers.map(h => {
       const display = getDisplayHeader(h);
       return `<th title="${escapeHtml(h)}">${escapeHtml(display)}</th>`;
@@ -1426,6 +1356,7 @@ function renderResultTable(tasks) {
     const tr = document.createElement('tr');
     const cells = [];
     cells.push(`<td class="row-num">${i + 1}</td>`);
+
     const statusInfo = statuses[r._taskId] || { level: 'green', reasons: [] };
     const reasonsText = statusInfo.reasons.length
       ? statusInfo.reasons.join(' · ')
@@ -1435,6 +1366,7 @@ function renderResultTable(tasks) {
       `<span class="status-light ${statusInfo.level}"></span>` +
       `</td>`
     );
+
     headers.forEach(h => {
       const raw = r[h];
       let status = evaluateCell(raw);
@@ -1530,17 +1462,11 @@ function renderResultTable(tasks) {
   }
 }
 
-/**
- * Convert a flattened path to a short display header.
- *   'header.company'              -> 'company'
- *   'section_1.codigo_componente' -> 'codigo_componente'
- *   'signatures.encargado_linea'  -> 'encargado_linea'
- *   '_file'                       -> '_file'
- */
 function getDisplayHeader(path) {
   const parts = String(path).split('.');
   return parts[parts.length - 1];
 }
+
 // ============================================================
 //  Zoom
 // ============================================================
@@ -1583,7 +1509,7 @@ function openEditModal(taskId) {
   editingDraft = JSON.parse(JSON.stringify(task.json));
 
   modalTitle.textContent = `Edit: ${task.file.name}`;
-  modalFileLabel.textContent = buildFilePath(task.file);
+  modalFileLabel.textContent = buildFilePathForTask(task);
 
   zoomState.scale = 1; zoomState.naturalW = 0; zoomState.naturalH = 0; zoomState.fitMode = null;
   zoomLabel.textContent = '100%';
@@ -1652,7 +1578,7 @@ function renderEditFields(task) {
 
       const label = document.createElement('label');
       label.htmlFor = `edit-${path}`;
-      label.title = path; // full path as tooltip
+      label.title = path;
       label.innerHTML = escapeHtml(getDisplayHeader(path)) +
         (hint ? `<span class="field-hint">${escapeHtml(hint)}</span>` : '');
       fieldEl.appendChild(label);
@@ -1775,7 +1701,7 @@ function onModalReset() {
 }
 
 // ============================================================
-//  Excel export
+//  Excel export — 3 sheets
 // ============================================================
 function onDownloadExcel() {
   const successTasks = queue.filter(t => t.status === 'success' && t.json);
@@ -1786,11 +1712,9 @@ function onDownloadExcel() {
 
   const wb = XLSX.utils.book_new();
 
-  // ========================================================
-  //  Sheet 1: EBRO Merged (main data)
-  // ========================================================
+  // Sheet 1: EBRO Merged
   const rows = successTasks.map(t => ({
-    _file: buildFilePath(t.file),
+    _file: buildFilePathForTask(t),
     ...flattenJson(t.json)
   }));
 
@@ -1803,22 +1727,17 @@ function onDownloadExcel() {
   wsMain['!cols'] = headers.map(h => ({ wch: h === '_file' ? 40 : 22 }));
   XLSX.utils.book_append_sheet(wb, wsMain, 'EBRO Merged');
 
-  // ========================================================
-  //  Sheet 2: Extraction Results (with status lights)
-  // ========================================================
+  // Sheet 2: Extraction Results
   const { keyStats, statuses } = buildKeyParameterSummary(successTasks);
 
   const erHeader = ['#', 'Status', 'Judgement Reason', ...headers];
   const erRows = successTasks.map((t, i) => {
     const flat = flattenJson(t.json);
     const statusInfo = statuses[t.id] || { level: 'green', reasons: [] };
-
-    // Map level to a letter for compactness
     const statusLetter = { green: 'GREEN', yellow: 'YELLOW', red: 'RED' }[statusInfo.level] || 'GREEN';
     const reasonText = statusInfo.reasons.length
       ? statusInfo.reasons.join(' | ')
       : 'All fields present and valid';
-
     return [
       i + 1,
       statusLetter,
@@ -1829,16 +1748,14 @@ function onDownloadExcel() {
 
   const wsER = XLSX.utils.aoa_to_sheet([erHeader, ...erRows]);
   wsER['!cols'] = [
-    { wch: 5 },   // #
-    { wch: 10 },  // Status
-    { wch: 60 },  // Reason
+    { wch: 5 },
+    { wch: 10 },
+    { wch: 60 },
     ...headers.map(h => ({ wch: h === '_file' ? 40 : 22 }))
   ];
   XLSX.utils.book_append_sheet(wb, wsER, 'Extraction Results');
 
-  // ========================================================
-  //  Sheet 3: Parameter Summary + Quality Score
-  // ========================================================
+  // Sheet 3: Parameter Summary
   const quality = computeQualityScore(successTasks);
 
   const psAoa = [
@@ -1864,17 +1781,14 @@ function onDownloadExcel() {
 
   const wsPS = XLSX.utils.aoa_to_sheet(psAoa);
   wsPS['!cols'] = [
-    { wch: 28 },  // Key Parameter
-    { wch: 14 },  // Missing
-    { wch: 14 },  // Present
-    { wch: 12 },  // Total
-    { wch: 14 }   // Status
+    { wch: 28 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 12 },
+    { wch: 14 }
   ];
   XLSX.utils.book_append_sheet(wb, wsPS, 'Parameter Summary');
 
-  // ========================================================
-  //  Save
-  // ========================================================
   const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
   XLSX.writeFile(wb, `ebro-batch-${timestamp}.xlsx`);
 
@@ -1885,12 +1799,66 @@ function onDownloadExcel() {
     'success'
   );
 }
-// ============================================================
-//  Local Folder Mode (File System Access API)
-//  No Node.js required. Works in Chrome / Edge / Opera.
-// ============================================================
 
-// ---- IndexedDB helpers for persisting directory handles ----
+// ============================================================
+//  Input Method switching
+// ============================================================
+function applyInputMethod(method) {
+  inputMethod = method;
+  localStorage.setItem(INPUT_METHOD_STORAGE, method);
+
+  imsFolderBtn.classList.toggle('active', method === 'folder');
+  imsUploadBtn.classList.toggle('active', method === 'upload');
+
+  localModePanel.style.display = method === 'folder' ? 'block' : 'none';
+  uploadPanel.style.display = method === 'upload' ? 'block' : 'none';
+
+  if (method === 'upload') {
+    localStatus.textContent = '';
+    localStatus.className = 'local-status';
+  } else {
+    updateLocalStatusFromHandles();
+  }
+
+  updateLocalModeButtons();
+  updateButtonState();
+}
+
+function updateLocalStatusFromHandles() {
+  if (inputMethod !== 'folder') return;
+  const hasInput = !!localHandles.input;
+  const hasReaded = !!localHandles.readed;
+  const hasError = !!localHandles.error;
+
+  if (hasInput && hasReaded && hasError) {
+    localStatus.textContent = '✅ All folders authorized';
+    localStatus.className = 'local-status connected';
+  } else if (hasInput) {
+    localStatus.textContent = `⚠️ ${hasReaded ? '' : 'readed '}${hasError ? '' : 'error '}folder(s) missing`;
+    localStatus.className = 'local-status error';
+  } else {
+    localStatus.textContent = 'Not authorized';
+    localStatus.className = 'local-status';
+  }
+}
+
+function switchInputMethod(method) {
+  if (method === inputMethod) return;
+  applyInputMethod(method);
+}
+
+function updateLocalModeButtons() {
+  if (typeof window.showDirectoryPicker !== 'function') return;
+  const hasInput = !!localHandles.input;
+  const hasReaded = !!localHandles.readed;
+  const hasError = !!localHandles.error;
+  localLoadBtn.disabled = inputMethod !== 'folder' || !hasInput;
+  localProcessBtn.disabled = inputMethod !== 'folder' || !hasReaded || !hasError || queue.length === 0;
+}
+
+// ============================================================
+//  Local Folder Mode
+// ============================================================
 function idbOpen() {
   return new Promise((resolve, reject) => {
     const req = indexedDB.open(LOCAL_HANDLE_DB, 1);
@@ -1922,17 +1890,6 @@ async function idbGet(key) {
   });
 }
 
-async function idbDelete(key) {
-  const db = await idbOpen();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction('handles', 'readwrite');
-    tx.objectStore('handles').delete(key);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-// ---- Verify permission on a stored handle ----
 async function verifyHandlePermission(handle) {
   if (!handle) return false;
   const opts = { mode: 'readwrite' };
@@ -1941,10 +1898,8 @@ async function verifyHandlePermission(handle) {
   return false;
 }
 
-// ---- Restore saved handles on page load ----
 async function restoreLocalHandles() {
   if (typeof window.showDirectoryPicker !== 'function') return;
-
   for (const key of ['input', 'readed', 'error']) {
     try {
       const handle = await idbGet(key);
@@ -1957,9 +1912,9 @@ async function restoreLocalHandles() {
     }
   }
   updateLocalModeButtons();
+  updateLocalStatusFromHandles();
 }
 
-// ---- Pick a folder ----
 async function pickLocalFolder(key) {
   try {
     const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
@@ -1967,8 +1922,7 @@ async function pickLocalFolder(key) {
     await idbSet(key, handle);
     updateLocalFolderLabel(key, handle.name, true);
     updateLocalModeButtons();
-    localStatus.textContent = `✅ ${key} folder: ${handle.name}`;
-    localStatus.className = 'local-status connected';
+    updateLocalStatusFromHandles();
   } catch (err) {
     if (err.name === 'AbortError') return;
     console.error('pickLocalFolder error:', err);
@@ -1977,7 +1931,6 @@ async function pickLocalFolder(key) {
   }
 }
 
-// ---- Update the label + button color ----
 function updateLocalFolderLabel(key, name, authorized) {
   const labelMap = {
     input: localInputLabel,
@@ -1992,75 +1945,7 @@ function updateLocalFolderLabel(key, name, authorized) {
   labelMap[key].value = name || '';
   if (authorized) btnMap[key].classList.add('authorized');
 }
-/**
- * Apply the chosen input method to the UI.
- */
-function applyInputMethod(method) {
-  inputMethod = method;
-  localStorage.setItem(INPUT_METHOD_STORAGE, method);
 
-  // Toggle active button
-  imsFolderBtn.classList.toggle('active', method === 'folder');
-  imsUploadBtn.classList.toggle('active', method === 'upload');
-
-  // Toggle panels
-  localModePanel.style.display = method === 'folder' ? 'block' : 'none';
-  uploadPanel.style.display = method === 'upload' ? 'block' : 'none';
-
-  // If switching away from folder mode, hide the status dot
-  if (method === 'upload') {
-    localStatus.textContent = '';
-    localStatus.className = 'local-status';
-  } else {
-    // Folder mode: show current auth status
-    updateLocalStatusFromHandles();
-  }
-
-  // Refresh buttons
-  updateLocalModeButtons();
-  updateButtonState();
-}
-
-/**
- * Update the small status label next to the input method selector
- * based on the current folder handles.
- */
-function updateLocalStatusFromHandles() {
-  if (inputMethod !== 'folder') return;
-  const hasInput = !!localHandles.input;
-  const hasReaded = !!localHandles.readed;
-  const hasError = !!localHandles.error;
-
-  if (hasInput && hasReaded && hasError) {
-    localStatus.textContent = '✅ All folders authorized';
-    localStatus.className = 'local-status connected';
-  } else if (hasInput) {
-    localStatus.textContent = `⚠️ ${hasReaded ? '' : 'readed '}${hasError ? '' : 'error '}folder(s) missing`;
-    localStatus.className = 'local-status error';
-  } else {
-    localStatus.textContent = 'Not authorized';
-    localStatus.className = 'local-status';
-  }
-}
-
-/**
- * Handle switching input method via button clicks.
- */
-function switchInputMethod(method) {
-  if (method === inputMethod) return;
-  applyInputMethod(method);
-}
-// ---- Enable/disable buttons based on state ----
-function updateLocalModeButtons() {
-  if (typeof window.showDirectoryPicker !== 'function') return;
-  const hasInput = !!localHandles.input;
-  const hasReaded = !!localHandles.readed;
-  const hasError = !!localHandles.error;
-  localLoadBtn.disabled = inputMethod !== 'folder' || !hasInput;
-  localProcessBtn.disabled = inputMethod !== 'folder' || !hasReaded || !hasError || queue.length === 0;
-}
-
-// ---- List all image files in the input folder ----
 async function loadLocalFiles() {
   if (!localHandles.input) {
     localStatus.textContent = '❌ Please select the input folder first.';
@@ -2159,6 +2044,7 @@ async function loadLocalFiles() {
     localStatus.className = 'local-status error';
   }
 }
+
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -2168,7 +2054,6 @@ function fileToDataUrl(file) {
   });
 }
 
-// ---- Process all pending files and move them ----
 async function processLocalBatch() {
   if (isRunning) return;
   const apiKey = apiKeyInput.value.trim();
@@ -2187,7 +2072,6 @@ async function processLocalBatch() {
     return;
   }
 
-  // Verify permissions on target folders
   const okReaded = await verifyHandlePermission(localHandles.readed);
   const okError = await verifyHandlePermission(localHandles.error);
   if (!okReaded || !okError) {
@@ -2210,7 +2094,7 @@ async function processLocalBatch() {
     task.status = 'processing';
     renderQueue();
 
-    // ---- Step 1: Extract with AI ----
+    // Step 1: Extract with AI
     try {
       await rateLimiter.wait();
       const json = await extractOneWithRetry(task, apiKey, platform);
@@ -2226,7 +2110,7 @@ async function processLocalBatch() {
       failed++;
     }
 
-    // ---- Step 2: Move file to target folder ----
+    // Step 2: Move file to target folder
     try {
       const targetHandle = task.status === 'success' ? localHandles.readed : localHandles.error;
       const movedName = await moveLocalFile(task, targetHandle);
@@ -2237,7 +2121,6 @@ async function processLocalBatch() {
       task.error = (task.error ? task.error + ' | ' : '') + 'Move failed: ' + moveErr.message;
     }
 
-    // ---- Step 3: Update progress ----
     done++;
     progressBar.style.width = `${(done / pending.length) * 100}%`;
     renderQueue();
@@ -2248,17 +2131,14 @@ async function processLocalBatch() {
   updateButtonState();
   updateLocalModeButtons();
 
-  // Refresh DeepSeek balance if applicable
   if (platform === 'deepseek') fetchDeepSeekBalance();
 
-  // Summary
   summaryEl.style.display = 'block';
   summaryEl.innerHTML =
-    `✅ Succeeded: ${success} → moved to readed · ` +
-    `❌ Failed: ${failed} → moved to error · ` +
+    `✅ Succeeded: ${success} → readed · ` +
+    `❌ Failed: ${failed} → error · ` +
     `Total: ${pending.length}`;
 
-  // Render results table for successful tasks
   const successTasks = queue.filter(t => t.status === 'success' && t.json);
   if (successTasks.length) {
     renderResultTable(successTasks);
@@ -2271,7 +2151,6 @@ async function processLocalBatch() {
   );
 }
 
-// ---- Move a file using File System Access API ----
 async function moveLocalFile(task, targetDirHandle) {
   if (!task.localHandle || !task.localName) {
     throw new Error('Missing local handle');
@@ -2304,27 +2183,19 @@ async function moveLocalFile(task, targetDirHandle) {
 
   return finalName;
 }
-/**
- * Move a file from one folder back to another, and return a new handle
- * pointing to its new location.
- *
- * Used by retryOne() to pull a file out of error/ back into input/ before retrying.
- */
+
 async function pullFileBackFromFolder(sourceDirHandle, targetDirHandle, fileName) {
   if (!sourceDirHandle || !targetDirHandle || !fileName) {
     throw new Error('Missing arguments for pull back');
   }
 
-  // Locate the file in the source folder
   const sourceFileHandle = await sourceDirHandle.getFileHandle(fileName, { create: false });
 
-  // Ensure the target doesn't already have a file with the same name
   let finalName = fileName;
   let attempts = 0;
   while (attempts < 3) {
     try {
       await targetDirHandle.getFileHandle(finalName, { create: false });
-      // Collision → rename
       const dot = finalName.lastIndexOf('.');
       const base = dot > 0 ? finalName.slice(0, dot) : finalName;
       const ext = dot > 0 ? finalName.slice(dot) : '';
@@ -2332,18 +2203,16 @@ async function pullFileBackFromFolder(sourceDirHandle, targetDirHandle, fileName
       finalName = `${base}_${ts}${ext}`;
       attempts++;
     } catch (e) {
-      break; // no collision
+      break;
     }
   }
 
-  // Copy content to the target folder
   const srcFile = await sourceFileHandle.getFile();
   const destHandle = await targetDirHandle.getFileHandle(finalName, { create: true });
   const writable = await destHandle.createWritable();
   await writable.write(srcFile);
   await writable.close();
 
-  // Remove from the source folder
   await sourceDirHandle.removeEntry(fileName);
 
   return { handle: destHandle, name: finalName };
