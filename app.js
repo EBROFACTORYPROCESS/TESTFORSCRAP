@@ -221,14 +221,12 @@ function attachEventListeners() {
     if (e.key === 'Escape' && modalOverlay.classList.contains('open')) closeEditModal();
   });
     // Local mode
-  if (typeof window.showDirectoryPicker === 'function') {
-    localModeToggle.addEventListener('change', () => {
-      localMode = localModeToggle.checked;
-      localStorage.setItem(LOCAL_MODE_STORAGE, localMode ? '1' : '0');
-      localModePanel.style.display = localMode ? 'block' : 'none';
-      updateLocalModeButtons();
-    });
+  // Input method selector
+  imsFolderBtn.addEventListener('click', () => switchInputMethod('folder'));
+  imsUploadBtn.addEventListener('click', () => switchInputMethod('upload'));
 
+  // Local folder mode (only if supported)
+  if (typeof window.showDirectoryPicker === 'function') {
     localPickInputBtn.addEventListener('click', () => pickLocalFolder('input'));
     localPickReadedBtn.addEventListener('click', () => pickLocalFolder('readed'));
     localPickErrorBtn.addEventListener('click', () => pickLocalFolder('error'));
@@ -1996,15 +1994,72 @@ function updateLocalFolderLabel(key, name, authorized) {
   labelMap[key].value = name || '';
   if (authorized) btnMap[key].classList.add('authorized');
 }
+/**
+ * Apply the chosen input method to the UI.
+ */
+function applyInputMethod(method) {
+  inputMethod = method;
+  localStorage.setItem(INPUT_METHOD_STORAGE, method);
 
+  // Toggle active button
+  imsFolderBtn.classList.toggle('active', method === 'folder');
+  imsUploadBtn.classList.toggle('active', method === 'upload');
+
+  // Toggle panels
+  localModePanel.style.display = method === 'folder' ? 'block' : 'none';
+  uploadPanel.style.display = method === 'upload' ? 'block' : 'none';
+
+  // If switching away from folder mode, hide the status dot
+  if (method === 'upload') {
+    localStatus.textContent = '';
+    localStatus.className = 'local-status';
+  } else {
+    // Folder mode: show current auth status
+    updateLocalStatusFromHandles();
+  }
+
+  // Refresh buttons
+  updateLocalModeButtons();
+  updateButtonState();
+}
+
+/**
+ * Update the small status label next to the input method selector
+ * based on the current folder handles.
+ */
+function updateLocalStatusFromHandles() {
+  if (inputMethod !== 'folder') return;
+  const hasInput = !!localHandles.input;
+  const hasReaded = !!localHandles.readed;
+  const hasError = !!localHandles.error;
+
+  if (hasInput && hasReaded && hasError) {
+    localStatus.textContent = '✅ All folders authorized';
+    localStatus.className = 'local-status connected';
+  } else if (hasInput) {
+    localStatus.textContent = `⚠️ ${hasReaded ? '' : 'readed '}${hasError ? '' : 'error '}folder(s) missing`;
+    localStatus.className = 'local-status error';
+  } else {
+    localStatus.textContent = 'Not authorized';
+    localStatus.className = 'local-status';
+  }
+}
+
+/**
+ * Handle switching input method via button clicks.
+ */
+function switchInputMethod(method) {
+  if (method === inputMethod) return;
+  applyInputMethod(method);
+}
 // ---- Enable/disable buttons based on state ----
 function updateLocalModeButtons() {
   if (typeof window.showDirectoryPicker !== 'function') return;
   const hasInput = !!localHandles.input;
   const hasReaded = !!localHandles.readed;
   const hasError = !!localHandles.error;
-  localLoadBtn.disabled = !localMode || !hasInput;
-  localProcessBtn.disabled = !localMode || !hasReaded || !hasError || queue.length === 0;
+  localLoadBtn.disabled = inputMethod !== 'folder' || !hasInput;
+  localProcessBtn.disabled = inputMethod !== 'folder' || !hasReaded || !hasError || queue.length === 0;
 }
 
 // ---- List all image files in the input folder ----
