@@ -1038,8 +1038,133 @@ function evaluateCell(value) {
   if (/^[\-_.·]+$/.test(s)) return 'suspicious';
   return 'ok';
 }
+/**
+ * Check if a value is considered "missing" for a given path.
+ * Signature fields treat "Not Signed" as missing.
+ */
+function isValueMissing(path, value) {
+  if (value === null || value === undefined) return true;
+  const s = String(value).trim();
+  if (s === '') return true;
+
+  // Signature fields: "Not Signed" counts as missing
+  if (path.startsWith('signatures.')) {
+    return !/^Signed$/i.test(s);
+  }
+
+  return false;
+}
+
+/**
+ * Build the summary of key parameters across all tasks.
+ * Returns { keyStats, statuses }
+ *   keyStats: { [path]: { label, missingCount, total } }
+ *   statuses: { [taskId]: { level: 'green'|'yellow'|'red', reasons: [] } }
+ */
+function buildKeyParameterSummary(tasks) {
+  const keyStats = {};
+  KEY_PARAMETERS.forEach(kp => {
+    keyStats[kp.path] = { label: kp.label, missingCount: 0, total: tasks.length };
+  });
+
+  const statuses = {};
+
+  tasks.forEach(task => {
+    const flat = flattenJson(task.json || {});
+    const reasons = [];
+    let keyMissing = 0;
+    let otherMissing = 0;
+    let otherFormatIssue = 0;
+
+    // Walk every flattened field and classify
+    Object.keys(flat).forEach(path => {
+      const value = flat[path];
+
+      // Skip internal fields
+      if (path === '_file' || path === '_taskId' || path === '_edited') return;
+
+      const isKey = KEY_PARAMETERS.some(kp => kp.path === path);
+
+      if (isValueMissing(path, value)) {
+        if (isKey) {
+          keyMissing++;
+          const label = KEY_PARAMETERS.find(kp => kp.path === path)?.label || path;
+          reasons.push(`Missing key parameter: ${label}`);
+          keyStats[path].missingCount++;
+        } else {
+          otherMissing++;
+          reasons.push(`Missing: ${getDisplayHeader(path)}`);
+        }
+        return;
+      }
+
+      // Format check
+      const fStatus = checkFormat(path, value);
+      if (fStatus === 'format-mismatch') {
+        if (isKey) {
+          // Format issue on a key parameter → also counts toward red
+          keyMissing++;
+          const label = KEY_PARAMETERS.find(kp => kp.path === path)?.label || path;
+          reasons.push(`Invalid format on key parameter: ${label}`);
+          keyStats[path].missingCount++;
+        } else {
+          otherFormatIssue++;
+          reasons.push(`Format issue: ${getDisplayHeader(path)}`);
+        }
+      }
+    });
+
+    // Decide status level
+    let level = 'green';
+    if (keyMissing > 0) {
+      level = 'red';
+    } else if (otherMissing > 0 || otherFormatIssue > 0) {
+      level = 'yellow';
+    }
+
+    statuses[task.id] = { level, reasons };
+  });
+
+  return { keyStats, statuses };
+}
+
+/**
+ * Render the summary report at the top of the results section.
+ */
+function renderSummaryReport(keyStats, totalRows) {
+  const container = document.getElementById('summaryReport');
+  if (!container) return;
+
+  const items = KEY_PARAMETERS.map(kp => {
+    const stat = keyStats[kp.path];
+    const missing = stat.missingCount;
+    const present = stat.total - missing;
+    let cls = 'ok';
+    if (missing > 0) {
+      cls = missing === stat.total ? 'err' : 'warn';
+    }
+    const countDisplay = missing === 0
+      ? `${present}/${stat.total}`
+      : `${missing} missing`;
+    return `
+      <div class="sr-item ${cls}">
+        <span class="sr-label">${escapeHtml(kp.label)}</span>
+        <span class="sr-count">${countDisplay}<small>${missing === 0 ? 'complete' : 'of ' + stat.total}</small></span>
+      </div>
+    `;
+  }).join('');
+
+  container.innerHTML = `
+    <div class="sr-title">📊 Key Parameters Summary · ${totalRows} form(s) processed</div>
+    <div class="sr-grid">${items}</div>
+  `;
+  container.style.display = 'block';
+}
 
 function renderResultTable(tasks) {
+  // ---- Build key parameter summary ----
+  const { keyStats, statuses } = buildKeyParameterSummary(tasks);
+  renderSummaryReport(keyStats, tasks.length);  
   const rows = tasks.map(t => ({
     _taskId: t.id,
     _file: buildFilePath(t.file),
@@ -1060,6 +1185,7 @@ function renderResultTable(tasks) {
   const headTr = document.createElement('tr');
   headTr.innerHTML =
     `<th class="row-num">#</th>` +
+    `<th class="status-col" title="Row status: green = all good, yellow = non-key fields missing, red = key parameters missing">●</th>` +    
     headers.map(h => {
       const display = getDisplayHeader(h);
       return `<th title="${escapeHtml(h)}">${escapeHtml(display)}</th>`;
@@ -1073,7 +1199,15 @@ function renderResultTable(tasks) {
     const tr = document.createElement('tr');
     const cells = [];
     cells.push(`<td class="row-num">${i + 1}</td>`);
-
+    const statusInfo = statuses[r._taskId] || { level: 'green', reasons: [] };
+    const reasonsText = statusInfo.reasons.length
+      ? statusInfo.reasons.join(' · ')
+      : 'All fields present and valid';
+    cells.push(
+      `<td class="status-col" title="${escapeHtml(reasonsText)}">` +
+      `<span class="status-light ${statusInfo.level}"></span>` +
+      `</td>`
+    );
     headers.forEach(h => {
       const raw = r[h];
       let status = evaluateCell(raw);
