@@ -1562,6 +1562,7 @@ function renderResultTable(tasks) {
     _taskId: t.id,
     _file: buildFilePathForTask(t),
     _edited: !!t.edited,
+    _signatureWarning: t.signatureWarning || null,
     ...flattenJson(t.json)
   }));
 
