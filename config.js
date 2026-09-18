@@ -94,9 +94,9 @@ let FIELD_SCHEMA = {
   },
   section_2: {
     motivo_rechace: { type: 'string', description: 'The rejecting code in the box labeled "MOTIVO RECHACE". Normally 4 digits, may contain letters (e.g. "2216", "2216D"). It is NOT a date and NOT an operator ID.' },
-    fecha: { type: 'string', description: 'The date when the record is registered, in the box labeled "FECHA". Format "DD/MM/YY", e.g. "22/4/26". Must look like a date.' },
+    fecha: { type: 'string', description: 'The date when the record was registered, written INSIDE the box labeled "FECHA" at the BOTTOM-LEFT of the form. Format is usually "DD/MM/YY", "D-M-YY", or "DD-MM-YYYY" (e.g. "22/4/26", "15-9-26"). This value belongs ONLY to the FECHA field — do NOT repeat it in the OPERARIO field below.'},
     observaciones: { type: 'string', description: 'The comments describing the issue, in the box labeled "OBSERVACIONES". A short text string, e.g. "Rápido", "Rayado". NOT a number, NOT a date.' },
-    operario: { type: 'string', description: 'The operator ID in the box labeled "OPERARIO". Normally 3 or 4 digits (e.g. "897"). Located directly below "FECHA".' }
+    operario: { type: 'string', description: 'The operator ID handwritten INSIDE the box labeled "OPERARIO", located at the BOTTOM-LEFT of the form, directly below the "FECHA" box. IMPORTANT: This box often appears EMPTY. If it is empty, return null — do NOT copy the date from the FECHA box above. A valid value is normally 3 or 4 digits (e.g. "897", "1234"). It is NEVER a date like "15-9-26".' }
   },
   signatures: {
     inspector: { type: 'string', description: 'Whether the "INSPECTOR" box has a handwritten signature. Return exactly "Signed" or "Not Signed".' },
@@ -111,6 +111,21 @@ const FORMAT_RULES = {
     test: v => /^(Process Scrap Parts|Supplier Claim Parts)$/i.test(v.trim()),
     hint: 'Expected "Process Scrap Parts" or "Supplier Claim Parts"'
   },
+  'section_1.codigo_conjunto': {
+    // Long alphanumeric code. May start with any character (letter or digit).
+    // Must NOT contain special symbols like ? ! @ # $ % & * ( ) = + [ ] { } etc.
+    // Allowed: letters A-Z, digits 0-9, space, and the separators / - .
+    test: v => {
+      const s = v.trim();
+      if (s.length < 8) return false; // too short to be a valid code
+      // Reject if it contains forbidden special characters
+      if (/[?!@#$%&*()=+\[\]{}<>"';:`~^|\\]/.test(s)) return false;
+      // Must contain at least one digit
+      if (!/\d/.test(s)) return false;
+      return true;
+    },
+    hint: 'Expected a long alphanumeric code (letters, digits, spaces, / - .). Must not contain special symbols.'
+  }
   'section_1.codigo_conjunto': { test: v => /^4[0-9A-Z\s\/\-]{6,}$/i.test(v.trim()), hint: 'Expected a long code starting with "4"' },
   'section_1.codigo_componente': { test: v => /[A-Za-z]/.test(v) && v.trim().length >= 4, hint: 'Expected a text description like "Pilar B/Sup/Der"' },
   'section_1.codigo_rechaz': { test: v => /^[0-9]{3,5}[A-Z]?$/i.test(v.trim()), hint: 'Expected a short numeric code like "2216"' },
