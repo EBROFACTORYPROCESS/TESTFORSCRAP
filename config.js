@@ -90,13 +90,14 @@ const PLATFORMS = {
 // Loaded from data.json at startup; this is the fallback if fetching fails.
 const FIELD_SCHEMA = {
   header: {
-    part_category: {
+    ticket_category: {
       type: 'string',
-      description: 'The category of the part, determined by the color of the TOP HEADER BAND of the form. Look at the broad colored strip across the top of the form, just below the EBRO logo area. If that header band is GREEN, return exactly "Process Scrap Parts". If that header band is ORANGE, return exactly "Supplier Claim Parts". Return exactly one of those two strings.'
+      description: 'The category of the ticket, determined by the color of the TOP HEADER BAND of the form. Look at the broad colored strip across the top of the form, just below the EBRO logo area. If that header band is GREEN, return exactly "Process Scrap Parts". If that header band is ORANGE, return exactly "Supplier Claim Parts". Return exactly one of those two strings.'
     },
-    company: { type: 'string', description: 'Top-left header inside a white box labeled "EBRO", usually reads "EBRO FACTORY". Located at the very top-left of the form.' },
-    document_type: { type: 'string', description: 'The large title printed in the colored band near the top, usually "CONTROL CALIDAD". Located below the EBRO logo.' },
-    red_number: { type: 'string', description: 'The large red printed number in the white box on the right side of the colored band, e.g. "173432". Located top-right, below the EBRO header.' }
+    ticket_id: {
+      type: 'string',
+      description: 'The large red printed number in the white box on the right side of the colored band, e.g. "173432". This is the unique ticket identifier printed at the top-right of the form.'
+    }
   },
   section_1: {
     codigo_conjunto: { type: 'string', description: 'The handwritten value inside the box labeled "CÓDIGO CONJUNTO", in the first row of the form body directly under the colored header band. It is usually a LONG alphanumeric code (typically 8-20 characters) that may start with any letter or digit. It may contain spaces and the characters / - . but should NOT contain special symbols like ? ! @ # $ % & * ( ) + = [ ] { } < >. Example: "40301YS92 AAAG4", "C4071823B", "601234X/2".'
@@ -130,7 +131,7 @@ const FIELD_SCHEMA = {
 
 // ---- Format validation rules ----
 const FORMAT_RULES = {
-  'header.part_category': {
+  'header.ticket_category': {
     test: v => /^(Process Scrap Parts|Supplier Claim Parts)$/i.test(v.trim()),
     hint: 'Expected "Process Scrap Parts" or "Supplier Claim Parts"'
   },
@@ -168,9 +169,10 @@ function buildPromptText() {
   lines.push('');
   lines.push('1. ORIENTATION: The image may be rotated. Before reading any field, mentally rotate so that the "EBRO" logo is TOP-LEFT and the colored header band runs horizontally across the top.');
   lines.push('');
-  lines.push('2. HEADER BAND COLOR:');
-  lines.push('   - GREEN → part_category = "Process Scrap Parts"');
-  lines.push('   - ORANGE → part_category = "Supplier Claim Parts"');
+  lines.push('2. TICKET CATEGORY (from the header band color):');
+  lines.push('   - GREEN header band  → ticket_category = "Process Scrap Parts"');
+  lines.push('   - ORANGE header band → ticket_category = "Supplier Claim Parts"');
+  lines.push('   Return that exact string in header.ticket_category.');
   lines.push('');
    lines.push('3. ANTI-DUPLICATION RULE (MANDATORY):');
   lines.push('   A single piece of handwritten text can only belong to ONE field. It can NEVER appear in two or more fields.');
