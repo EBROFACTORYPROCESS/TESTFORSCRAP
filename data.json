@@ -45,7 +45,7 @@
     },
     "fecha": {
       "type": "string",
-      "description": ""The date when the record was registered, written INSIDE the box labeled \"FECHA\" at the BOTTOM-LEFT of the form. Format is usually \"DD/MM/YY\", \"D-M-YY\", or \"DD-MM-YYYY\" (e.g. \"22/4/26\", \"15-9-26\"). This value belongs ONLY to the FECHA field — do NOT repeat it in the OPERARIO field below.""
+      "description": "The date when the record was registered, written INSIDE the box labeled \"FECHA\" at the BOTTOM-LEFT of the form. Format is usually \"DD/MM/YY\", \"D-M-YY\", or \"DD-MM-YYYY\" (e.g. \"22/4/26\", \"15-9-26\"). This value belongs ONLY to the FECHA field — do NOT repeat it in the OPERARIO field below.""
     },
     "observaciones": {
       "type": "string",
