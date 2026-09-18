@@ -1595,8 +1595,8 @@ function renderResultTable(tasks) {
     cells.push(`<td class="row-num">${i + 1}</td>`);
 
     const statusInfo = statuses[r._taskId] || { level: 'green', reasons: [] };
-    if (t.signatureWarning) {
-      statusInfo.reasons.push(t.signatureWarning);
+    if (r._signatureWarning) {
+      statusInfo.reasons.push(r._signatureWarning);
       if (statusInfo.level === 'green') statusInfo.level = 'yellow';
     }
     const reasonsText = statusInfo.reasons.length
