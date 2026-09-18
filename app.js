@@ -1273,6 +1273,9 @@ function evaluateCell(value) {
 }
 
 function isValueMissing(path, value) {
+  // Optional fields are never "missing" even when empty
+  if (OPTIONAL_FIELDS.includes(path)) return false;
+
   if (value === null || value === undefined) return true;
   const s = String(value).trim();
   if (s === '') return true;
