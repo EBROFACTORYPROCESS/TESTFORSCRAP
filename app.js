@@ -1090,9 +1090,10 @@ function stripFences(text) {
 function postProcess(parsed) {
   parsed = unwrapSchemaEcho(parsed);
   parsed = normalizeSignatures(parsed);
-  parsed = normalizePartCategory(parsed);
-  parsed = dedupeFields(parsed); 
+  parsed = normalizeTicketCategory(parsed);
+  parsed = dedupeFields(parsed);
   parsed = flagSuspiciousSignatures(parsed);
+  parsed = removeHiddenFields(parsed);
   return parsed;
 }
 /**
@@ -1136,7 +1137,7 @@ function dedupeFields(obj) {
   if (!obj || typeof obj !== 'object') return obj;
 
   // Per-section priority order (earlier = keeps the value if a duplicate is found)
-  const dedupeConfig = {
+     const dedupeConfig = {
     section_1: [
       'codigo_conjunto',
       'codigo_componente',
@@ -1151,10 +1152,8 @@ function dedupeFields(obj) {
       'observaciones'
     ],
     header: [
-      'part_category',
-      'company',
-      'document_type',
-      'red_number'
+      'ticket_category',
+      'ticket_id'
     ]
   };
 
@@ -1209,26 +1208,44 @@ function normalizeSignatures(obj) {
   return obj;
 }
 
-function normalizePartCategory(obj) {
+function normalizeTicketCategory(obj) {
   if (!obj || typeof obj !== 'object') return obj;
   if (!obj.header || typeof obj.header !== 'object') return obj;
 
-  const raw = obj.header.part_category;
+  // Support legacy field name just in case
+  const raw = obj.header.ticket_category ?? obj.header.part_category;
+
+  // Clean up legacy field
+  delete obj.header.part_category;
+
   if (raw === null || raw === undefined || String(raw).trim() === '') {
-    obj.header.part_category = 'Unknown';
+    obj.header.ticket_category = 'Unknown';
     return obj;
   }
   const s = String(raw).trim();
-  if (/^Process Scrap Parts$/i.test(s)) { obj.header.part_category = 'Process Scrap Parts'; return obj; }
-  if (/^Supplier Claim Parts$/i.test(s)) { obj.header.part_category = 'Supplier Claim Parts'; return obj; }
+
+  if (/^Process Scrap Parts$/i.test(s)) { obj.header.ticket_category = 'Process Scrap Parts'; return obj; }
+  if (/^Supplier Claim Parts$/i.test(s)) { obj.header.ticket_category = 'Supplier Claim Parts'; return obj; }
 
   const lower = s.toLowerCase();
   if (/green|scrap|proceso|process|rechazo interno|internal/.test(lower)) {
-    obj.header.part_category = 'Process Scrap Parts';
+    obj.header.ticket_category = 'Process Scrap Parts';
   } else if (/orange|supplier|proveedor|claim|reclamaci/.test(lower)) {
-    obj.header.part_category = 'Supplier Claim Parts';
+    obj.header.ticket_category = 'Supplier Claim Parts';
   } else {
-    obj.header.part_category = 'Unknown';
+    obj.header.ticket_category = 'Unknown';
+  }
+  return obj;
+}
+
+/**
+ * Remove fields we don't want in the output (hidden fields).
+ */
+function removeHiddenFields(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  if (obj.header && typeof obj.header === 'object') {
+    delete obj.header.company;
+    delete obj.header.document_type;
   }
   return obj;
 }
@@ -1640,7 +1657,7 @@ function renderResultTable(tasks) {
 
       let cls = '', badge = '';
 
-      if (h === 'header.part_category' && status === 'ok') {
+      if (h === 'header.ticket_category' && status === 'ok') {
         const v = String(raw).toLowerCase();
         if (v.includes('process scrap')) {
           cls = 'cell-category-scrap';
@@ -1696,8 +1713,8 @@ function renderResultTable(tasks) {
   const totalCells = rows.length * headers.length;
   const totalIssues = missingCount + suspiciousCount + formatCount;
   const editedCount = rows.filter(r => r._edited).length;
-  const scrapCount = rows.filter(r => String(r['header.part_category'] || '').includes('Process Scrap')).length;
-  const supplierCount = rows.filter(r => String(r['header.part_category'] || '').includes('Supplier Claim')).length;
+  const scrapCount = rows.filter(r => String(r['header.ticket_category'] || '').includes('Process Scrap')).length;
+  const supplierCount = rows.filter(r => String(r['header.ticket_category'] || '').includes('Supplier Claim')).length;
 
   if (totalIssues === 0) {
     issuesBanner.classList.add('all-good');
@@ -1842,9 +1859,9 @@ function renderEditFields(task) {
       const fieldEl = document.createElement('div');
       fieldEl.className = 'edit-field';
       fieldEl.dataset.path = path;
-
+      
       const isSignature = section === 'signatures';
-      const isPartCategory = path === 'header.part_category';
+      const isTicketCategory = path === 'header.ticket_category';
       const hint = getFieldHint(path);
 
       const label = document.createElement('label');
@@ -1863,7 +1880,7 @@ function renderEditFields(task) {
           if (String(currentValue) === opt) o.selected = true;
           input.appendChild(o);
         });
-      } else if (isPartCategory) {
+      } else if (isTicketCategory) {
         input = document.createElement('select');
         ['Process Scrap Parts', 'Supplier Claim Parts', 'Unknown'].forEach(opt => {
           const o = document.createElement('option');
@@ -1994,13 +2011,20 @@ function onDownloadExcel() {
   const wb = XLSX.utils.book_new();
 
   // Sheet 1: EBRO Merged
-  const rows = successTasks.map(t => ({
-    _file: buildFilePathForTask(t),
-    ...flattenJson(t.json)
-  }));
+   const rows = successTasks.map(t => {
+    const flat = flattenJson(t.json);
+    HIDDEN_FIELDS.forEach(f => { delete flat[f]; });
+    return {
+      _file: buildFilePathForTask(t),
+      ...flat
+    };
+  });
 
   const headerSet = new Set(['_file']);
-  rows.forEach(r => Object.keys(r).forEach(k => headerSet.add(k)));
+  rows.forEach(r => Object.keys(r).forEach(k => {
+    if (HIDDEN_FIELDS.includes(k)) return;
+    headerSet.add(k);
+  }));
   const headers = Array.from(headerSet);
 
   const aoa = [headers, ...rows.map(r => headers.map(h => r[h] ?? ''))];
