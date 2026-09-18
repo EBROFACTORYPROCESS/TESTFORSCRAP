@@ -1568,7 +1568,8 @@ function renderResultTable(tasks) {
 
   const headerSet = new Set(['_file']);
   rows.forEach(r => Object.keys(r).forEach(k => {
-    if (k === '_taskId' || k === '_edited'|| k === '_signatureWarning') return;
+    if (k === '_taskId' || k === '_edited' || k === '_signatureWarning') return;
+    if (HIDDEN_FIELDS.includes(k)) return;   // ← hide company, document_type
     headerSet.add(k);
   }));
   const headers = Array.from(headerSet);
