@@ -85,7 +85,8 @@ let FIELD_SCHEMA = {
     red_number: { type: 'string', description: 'The large red printed number in the white box on the right side of the colored band, e.g. "173432". Located top-right, below the EBRO header.' }
   },
   section_1: {
-    codigo_conjunto: { type: 'string', description: 'The handwritten value inside the box labeled "CÓDIGO CONJUNTO". Usually a long alphanumeric code starting with "4", e.g. "40301YS92 AAAG4".' },
+    codigo_conjunto: { type: 'string', description: 'The handwritten value inside the box labeled "CÓDIGO CONJUNTO", in the first row of the form body directly under the colored header band. It is usually a LONG alphanumeric code (typically 8-20 characters) that may start with any letter or digit. It may contain spaces and the characters / - . but should NOT contain special symbols like ? ! @ # $ % & * ( ) + = [ ] { } < >. Example: "40301YS92 AAAG4", "C4071823B", "601234X/2".'
+    },    
     codigo_componente: { type: 'string', description: 'The handwritten value inside the box labeled "CÓDIGO COMPONENTE". Usually contains "/" separators, e.g. "Pilar B/Sup/Der".' },
     codigo_rechaz: { type: 'string', description: 'The handwritten value inside the small box labeled "CÓDIGO RECHAZ". Usually a short numeric code, e.g. "2216".' },
     cantidad: { type: 'string', description: 'The handwritten value in the box labeled "CANTIDAD". Usually a single small number, e.g. "2".' },
