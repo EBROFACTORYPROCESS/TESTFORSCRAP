@@ -99,9 +99,18 @@ const FIELD_SCHEMA = {
     operario: { type: 'string', description: 'A short OPERATOR ID handwritten INSIDE the small box labeled "OPERARIO". This box sits DIRECTLY BELOW the "FECHA" box at the BOTTOM-LEFT of the form. Valid values are 3 or 4 digits (e.g. "897", "1234"). IMPORTANT: This box is VERY OFTEN EMPTY. If empty, return null. If the only handwriting in that area is the date (in the FECHA box above), do NOT copy it down — operario must stay null. It is NEVER a date, NEVER a defect description, NEVER a word.' }
   },
   signatures: {
-    inspector: { type: 'string', description: 'Whether the "INSPECTOR" box has a handwritten signature. Return exactly "Signed" or "Not Signed".' },
-    visto_bueno_calidad: { type: 'string', description: 'Whether the "Vº Bº C. CALIDAD" box has a handwritten signature. Return exactly "Signed" or "Not Signed".' },
-    encargado_linea: { type: 'string', description: 'Whether the "ENCARGADO LÍNEA" box has a handwritten signature. Return exactly "Signed" or "Not Signed".' }
+    inspector: {
+      type: 'string',
+      description: 'Return "Signed" ONLY IF you can see a handwritten signature (cursive strokes, a name, initials, or a clearly drawn mark) drawn INSIDE the small box labeled "Inspector" at the BOTTOM-LEFT of the form. The box is bordered by printed lines. If the box contains ONLY the printed label "Inspector" and no handwriting, return "Not Signed". Do NOT count handwriting that is above the box, next to it, or in a different box.'
+    },
+    visto_bueno_calidad: {
+      type: 'string',
+      description: 'Return "Signed" ONLY IF you can see a handwritten signature drawn INSIDE the small box labeled "Calidad" or "Vº Bº C. CALIDAD" at the BOTTOM-CENTER of the form. If the box contains ONLY the printed label and no handwriting, return "Not Signed". Do NOT count handwriting from other boxes. Do NOT assume it is signed because the form has other signatures.'
+    },
+    encargado_linea: {
+      type: 'string',
+      description: 'Return "Signed" ONLY IF you can see a handwritten signature drawn INSIDE the small box labeled "Encargado" or "ENCARGADO LÍNEA" at the BOTTOM-RIGHT of the form. If the box contains ONLY the printed label and no handwriting, return "Not Signed". Each of the three signature boxes is INDEPENDENT — a signature in one box does NOT imply the others are signed.'
+    }
   }
 };
 
@@ -191,7 +200,18 @@ function buildPromptText() {
   lines.push('');
   lines.push('6. Each field description below tells you exactly where its label is and what its value should look like.');
   lines.push('7. For handwritten values, transcribe exactly what you see.');
-  lines.push('8. For signature fields, return exactly "Signed" or "Not Signed".');
+  lines.push('8. SIGNATURE FIELDS — READ CAREFULLY:');
+  lines.push('   The form has THREE independent signature boxes near the bottom:');
+  lines.push('     - "Inspector"       (bottom-left)');
+  lines.push('     - "Calidad" / "Vº Bº C. CALIDAD"  (bottom-center)');
+  lines.push('     - "Encargado" / "ENCARGADO LÍNEA" (bottom-right)');
+  lines.push('   For each box, return exactly "Signed" or "Not Signed".');
+  lines.push('   Return "Signed" ONLY IF there is a handwritten signature (cursive strokes, a name, initials, or a drawn mark) INSIDE that specific box.');
+  lines.push('   Return "Not Signed" if the box contains ONLY the printed label and no handwriting.');
+  lines.push('   The three boxes are INDEPENDENT:');
+  lines.push('     - If only the Encargado box is signed, then inspector = "Not Signed", calidad = "Not Signed", encargado = "Signed".');
+  lines.push('     - DO NOT mark all three as "Signed" just because one of them is signed.');
+  lines.push('     - DO NOT mark a box as "Signed" because there is handwriting somewhere else on the form.');
   lines.push('9. If a non-signature field is empty or illegible, use null. NEVER copy a neighbor value to fill it.');
   lines.push('');
   lines.push('Return a valid JSON object with the structure below:');
