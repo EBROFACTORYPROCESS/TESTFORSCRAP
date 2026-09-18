@@ -74,7 +74,7 @@ const PLATFORMS = {
 
 // ---- Field schema (descriptions sent to the AI) ----
 // Loaded from data.json at startup; this is the fallback if fetching fails.
-let FIELD_SCHEMA = {
+const FIELD_SCHEMA = {
   header: {
     part_category: {
       type: 'string',
@@ -93,10 +93,10 @@ let FIELD_SCHEMA = {
     origen_area_zona: { type: 'string', description: 'The handwritten value in the "ORIGEN" box. Usually a short code like "n 1 5 2".' }
   },
   section_2: {
-    motivo_rechace: { type: 'string', description: 'The rejection reason handwritten in the box labeled "MOTIVO RECHACE". This box is in the LOWER-LEFT of the form, below the "ORIGEN" row. It often contains a short description of the defect (e.g. "DESCASCARADA CON GOLPE DE CAJAS", "RAYADO", "GOLPE"). It is NEVER a date, NEVER a 4-digit code, NEVER an operator ID. It is USUALLY a description. IMPORTANT: This value must appear ONLY in this field. If you see the same text in fecha, operario, or observaciones, those are ERRORS — set them to null.' },
-    fecha: { type: 'string', description: 'A DATE written inside the small box labeled "FECHA" at the BOTTOM-LEFT of the form. The value MUST match a date pattern such as "DD/MM/YY", "D/M/YY", "DD-MM-YYYY", or "D-M-YY" (e.g. "22/4/26", "15-9-26", "7/11/26"). If the box does NOT contain something that looks like a date, return null. A defect description like "DESCASCARADA CON GOLPE DE CAJAS" is NEVER a valid fecha. Do NOT copy text from MOTIVO RECHACE into this field.'},
-    observaciones: { type: 'string', description: 'Free-text comments written in the wide box labeled "OBSERVACIONES" at the BOTTOM-CENTER of the form. This is typically a short phrase describing the issue (e.g. "Rápido", "Rayado", "Golpe"). If this box is empty, return null. Do NOT copy the MOTIVO RECHACE text into this box unless the exact same words are physically written inside the OBSERVACIONES box.'},
-    operario: { type: 'string', description: 'A short operator ID written inside the small box labeled "OPERARIO" at the BOTTOM-LEFT, DIRECTLY BELOW the "FECHA" box. Valid values are normally 3 or 4 digits (e.g. "897", "1234"). This box is OFTEN EMPTY — if empty, return null. It is NEVER a date, NEVER a defect description. Do NOT copy text from MOTIVO RECHACE or FECHA into this field.' }
+    motivo_rechace: { type: 'string', description:  'A rejection reason handwritten INSIDE the box labeled "MOTIVO RECHACE", in the LOWER-LEFT of the form. It is typically a short phrase describing the defect, e.g. "DESCASCARADA CON GOLPE DE CAJAS", "RAYADO", "GOLPE". It is NEVER a date, NEVER an operator ID, NEVER a 4-digit code. The text must be physically written INSIDE the MOTIVO RECHACE box — do NOT spread it to other fields.' },
+    fecha: { type: 'string', description: 'A DATE handwritten INSIDE the small box labeled "FECHA" at the BOTTOM-LEFT of the form. The box is small and bordered by printed lines. A valid value MUST look like a date: "DD/MM/YY", "D/M/YY", "D-M-YY", "DD-MM-YYYY" (e.g. "22/4/26", "15-9-26"). If the box contains anything that is NOT a date — for example a word, a defect description, or an operator ID — return null. Do NOT invent a value. Do NOT copy the date into the OPERARIO box below.'},
+    observaciones: { type: 'string', description: 'Free-text comments handwritten INSIDE the wide box labeled "OBSERVACIONES" at the BOTTOM-CENTER of the form. This box is OFTEN EMPTY. If empty, return null. The value must be physically written INSIDE the OBSERVACIONES box — do NOT copy text from MOTIVO RECHACE, FECHA, or OPERARIO.'},
+    operario: { type: 'string', description: 'A short OPERATOR ID handwritten INSIDE the small box labeled "OPERARIO". This box sits DIRECTLY BELOW the "FECHA" box at the BOTTOM-LEFT of the form. Valid values are 3 or 4 digits (e.g. "897", "1234"). IMPORTANT: This box is VERY OFTEN EMPTY. If empty, return null. If the only handwriting in that area is the date (in the FECHA box above), do NOT copy it down — operario must stay null. It is NEVER a date, NEVER a defect description, NEVER a word.' }
   },
   signatures: {
     inspector: { type: 'string', description: 'Whether the "INSPECTOR" box has a handwritten signature. Return exactly "Signed" or "Not Signed".' },
@@ -136,21 +136,6 @@ const FORMAT_RULES = {
   'signatures.encargado_linea': { test: v => /^(Signed|Not Signed)$/i.test(v.trim()), hint: 'Expected "Signed" or "Not Signed"' }
 };
 
-// ---- Load schema from data.json (async) ----
-async function loadFieldSchemaFromJson() {
-  try {
-    const res = await fetch('data.json', { cache: 'no-cache' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    if (data && typeof data === 'object' && data.header) {
-      FIELD_SCHEMA = data;
-      console.log('✅ Loaded FIELD_SCHEMA from data.json');
-    }
-  } catch (err) {
-    console.warn('⚠️ Could not load data.json, using built-in fallback.', err);
-  }
-}
-
 // ---- Prompt builders ----
 function buildPromptText() {
   const lines = [];
@@ -164,23 +149,30 @@ function buildPromptText() {
   lines.push('   - GREEN → part_category = "Process Scrap Parts"');
   lines.push('   - ORANGE → part_category = "Supplier Claim Parts"');
   lines.push('');
-  lines.push('3. ANTI-DUPLICATION RULE (READ CAREFULLY):');
-  lines.push('   The SAME piece of handwritten text MUST NEVER appear in more than one field.');
-  lines.push('   If you find yourself writing the same string into two or more fields, you are making an error.');
-  lines.push('   Before returning the JSON, do a final check: compare every non-null value against every other value.');
-  lines.push('   If two different fields contain the same string, KEEP only the value in the field whose box physically contains that handwriting, and set ALL other copies to null.');
+   lines.push('3. ANTI-DUPLICATION RULE (MANDATORY):');
+  lines.push('   A single piece of handwritten text can only belong to ONE field. It can NEVER appear in two or more fields.');
+  lines.push('   Before returning the JSON, perform this verification step:');
+  lines.push('     a) Build a list of all non-null values.');
+  lines.push('     b) For each pair of fields, check whether their values are identical (case-insensitive, ignoring extra spaces).');
+  lines.push('     c) If two fields have the same value, KEEP it only in the field whose printed box physically contains that handwriting, and set the other to null.');
   lines.push('   ');
-  lines.push('   Example of a WRONG output:');
+  lines.push('   Concrete example — this is WRONG:');
+  lines.push('     fecha:          "15-9-26"');
+  lines.push('     operario:       "15-9-26"    ← WRONG, duplicated');
+  lines.push('   ');
+  lines.push('   Correct output:');
+  lines.push('     fecha:          "15-9-26"');
+  lines.push('     operario:       null         ← the OPERARIO box is empty');
+  lines.push('   ');
+  lines.push('   Another example — this is WRONG:');
   lines.push('     motivo_rechace: "DESCASCARADA CON GOLPE DE CAJAS"');
-  lines.push('     fecha:          "DESCASCARADA CON GOLPE DE CAJAS"   ← WRONG');
   lines.push('     observaciones:  "DESCASCARADA CON GOLPE DE CAJAS"   ← WRONG');
   lines.push('     operario:       "DESCASCARADA CON GOLPE DE CAJAS"   ← WRONG');
   lines.push('   ');
-  lines.push('   Correct output for the same form:');
+  lines.push('   Correct output:');
   lines.push('     motivo_rechace: "DESCASCARADA CON GOLPE DE CAJAS"');
-  lines.push('     fecha:          null   (the FECHA box is empty)');
-  lines.push('     observaciones:  null   (the OBSERVACIONES box is empty)');
-  lines.push('     operario:       null   (the OPERARIO box is empty)');
+  lines.push('     observaciones:  null');
+  lines.push('     operario:       null');
   lines.push('');
   lines.push('4. STRICT FIELD-BOX READING:');
   lines.push('   Each value is written INSIDE a specific printed box on the form.');
