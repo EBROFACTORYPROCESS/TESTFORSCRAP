@@ -84,7 +84,6 @@ const zoomState = { scale: 1, naturalW: 0, naturalH: 0, fitMode: null };
 //  Bootstrap
 // ============================================================
 (async function init() {
-  await loadFieldSchemaFromJson();
 
   // Check browser support for File System Access API
   const supportsFS = typeof window.showDirectoryPicker === 'function';
