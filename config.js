@@ -21,6 +21,21 @@ const KEY_PARAMETERS = [
   { path: 'section_2.operario',           label: 'Operario' },
   { path: 'signatures.encargado_linea',   label: 'Signature Encargado Línea' }
 ];
+
+// Fields that should NEVER be classified as "missing" even when empty.
+// Their emptiness is normal for this form.
+const OPTIONAL_FIELDS = [
+  'section_2.observaciones',
+  'section_2.motivo_rechace',
+  'section_1.codigo_componente',
+  'section_1.origen_area_zona'
+];
+
+// Fields to hide from the result table and KPI summary.
+const HIDDEN_FIELDS = [
+  'header.company',
+  'header.document_type'
+];
 // ---- AI Platform configs ----
 const PLATFORMS = {
   gemini: {
