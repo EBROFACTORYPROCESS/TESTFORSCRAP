@@ -93,10 +93,10 @@ let FIELD_SCHEMA = {
     origen_area_zona: { type: 'string', description: 'The handwritten value in the "ORIGEN" box. Usually a short code like "n 1 5 2".' }
   },
   section_2: {
-    motivo_rechace: { type: 'string', description: 'The rejecting code in the box labeled "MOTIVO RECHACE". Normally 4 digits, may contain letters (e.g. "2216", "2216D"). It is NOT a date and NOT an operator ID.' },
-    fecha: { type: 'string', description: 'The date when the record was registered, written INSIDE the box labeled "FECHA" at the BOTTOM-LEFT of the form. Format is usually "DD/MM/YY", "D-M-YY", or "DD-MM-YYYY" (e.g. "22/4/26", "15-9-26"). This value belongs ONLY to the FECHA field — do NOT repeat it in the OPERARIO field below.'},
-    observaciones: { type: 'string', description: 'The comments describing the issue, in the box labeled "OBSERVACIONES". A short text string, e.g. "Rápido", "Rayado". NOT a number, NOT a date.' },
-    operario: { type: 'string', description: 'The operator ID handwritten INSIDE the box labeled "OPERARIO", located at the BOTTOM-LEFT of the form, directly below the "FECHA" box. IMPORTANT: This box often appears EMPTY. If it is empty, return null — do NOT copy the date from the FECHA box above. A valid value is normally 3 or 4 digits (e.g. "897", "1234"). It is NEVER a date like "15-9-26".' }
+    motivo_rechace: { type: 'string', description: 'The rejection reason handwritten in the box labeled "MOTIVO RECHACE". This box is in the LOWER-LEFT of the form, below the "ORIGEN" row. It often contains a short description of the defect (e.g. "DESCASCARADA CON GOLPE DE CAJAS", "RAYADO", "GOLPE"). It is NEVER a date, NEVER a 4-digit code, NEVER an operator ID. It is USUALLY a description. IMPORTANT: This value must appear ONLY in this field. If you see the same text in fecha, operario, or observaciones, those are ERRORS — set them to null.' },
+    fecha: { type: 'string', description: 'A DATE written inside the small box labeled "FECHA" at the BOTTOM-LEFT of the form. The value MUST match a date pattern such as "DD/MM/YY", "D/M/YY", "DD-MM-YYYY", or "D-M-YY" (e.g. "22/4/26", "15-9-26", "7/11/26"). If the box does NOT contain something that looks like a date, return null. A defect description like "DESCASCARADA CON GOLPE DE CAJAS" is NEVER a valid fecha. Do NOT copy text from MOTIVO RECHACE into this field.'},
+    observaciones: { type: 'string', description: 'Free-text comments written in the wide box labeled "OBSERVACIONES" at the BOTTOM-CENTER of the form. This is typically a short phrase describing the issue (e.g. "Rápido", "Rayado", "Golpe"). If this box is empty, return null. Do NOT copy the MOTIVO RECHACE text into this box unless the exact same words are physically written inside the OBSERVACIONES box.'},
+    operario: { type: 'string', description: 'A short operator ID written inside the small box labeled "OPERARIO" at the BOTTOM-LEFT, DIRECTLY BELOW the "FECHA" box. Valid values are normally 3 or 4 digits (e.g. "897", "1234"). This box is OFTEN EMPTY — if empty, return null. It is NEVER a date, NEVER a defect description. Do NOT copy text from MOTIVO RECHACE or FECHA into this field.' }
   },
   signatures: {
     inspector: { type: 'string', description: 'Whether the "INSPECTOR" box has a handwritten signature. Return exactly "Signed" or "Not Signed".' },
@@ -157,34 +157,50 @@ function buildPromptText() {
   lines.push('You are a data extraction assistant. Extract all information from this EBRO Factory "Control Calidad" form image.');
   lines.push('');
   lines.push('CRITICAL RULES:');
-  lines.push('1. ORIENTATION FIRST: The image may be rotated (0°, 90°, 180°, or 270°). Before reading any field, mentally rotate the image so that:');
-  lines.push('   - The "EBRO" logo and "FACTORY" text are at the TOP-LEFT and readable left-to-right.');
-  lines.push('   - The colored header band runs horizontally across the top.');
-  lines.push('   - All form labels (CÓDIGO CONJUNTO, FECHA, etc.) are upright and readable.');
-  lines.push('   If the form appears sideways or upside-down, correct it internally before extraction. Do NOT report the rotation; just extract values as if the form were upright.');
   lines.push('');
-  lines.push('2. HEADER BAND COLOR: Determine the color of the TOP HEADER BAND:');
+  lines.push('1. ORIENTATION: The image may be rotated. Before reading any field, mentally rotate so that the "EBRO" logo is TOP-LEFT and the colored header band runs horizontally across the top.');
+  lines.push('');
+  lines.push('2. HEADER BAND COLOR:');
   lines.push('   - GREEN → part_category = "Process Scrap Parts"');
   lines.push('   - ORANGE → part_category = "Supplier Claim Parts"');
-  lines.push('   Return that exact string in header.part_category.');
   lines.push('');
-  lines.push('3. STRICT FIELD-BOX READING (MOST IMPORTANT RULE):');
-  lines.push('   Each value MUST be read from INSIDE its own labeled box only. Do NOT read the same content into two different fields, even if they are adjacent.');
-  lines.push('   - Every field has its OWN dedicated rectangular box on the form.');
-  lines.push('   - A value written in the FECHA box belongs ONLY to section_2.fecha.');
-  lines.push('   - A value written in the OPERARIO box belongs ONLY to section_2.operario.');
-  lines.push('   - A value written in the CANTIDAD box belongs ONLY to section_1.cantidad.');
-  lines.push('   - NEVER duplicate the same string across two fields.');
-  lines.push('   - If a box is EMPTY, return null for that field — do NOT copy a value from an adjacent box.');
-  lines.push('   - Use the box BORDERS (the printed lines around each field) to decide where a value belongs.');
-  lines.push('   - Example mistake to AVOID: If the date "15-9-26" is written only in the FECHA box, and the OPERARIO box is empty, then fecha="15-9-26" and operario=null. Do NOT set operario="15-9-26".');
+  lines.push('3. ANTI-DUPLICATION RULE (READ CAREFULLY):');
+  lines.push('   The SAME piece of handwritten text MUST NEVER appear in more than one field.');
+  lines.push('   If you find yourself writing the same string into two or more fields, you are making an error.');
+  lines.push('   Before returning the JSON, do a final check: compare every non-null value against every other value.');
+  lines.push('   If two different fields contain the same string, KEEP only the value in the field whose box physically contains that handwriting, and set ALL other copies to null.');
+  lines.push('   ');
+  lines.push('   Example of a WRONG output:');
+  lines.push('     motivo_rechace: "DESCASCARADA CON GOLPE DE CAJAS"');
+  lines.push('     fecha:          "DESCASCARADA CON GOLPE DE CAJAS"   ← WRONG');
+  lines.push('     observaciones:  "DESCASCARADA CON GOLPE DE CAJAS"   ← WRONG');
+  lines.push('     operario:       "DESCASCARADA CON GOLPE DE CAJAS"   ← WRONG');
+  lines.push('   ');
+  lines.push('   Correct output for the same form:');
+  lines.push('     motivo_rechace: "DESCASCARADA CON GOLPE DE CAJAS"');
+  lines.push('     fecha:          null   (the FECHA box is empty)');
+  lines.push('     observaciones:  null   (the OBSERVACIONES box is empty)');
+  lines.push('     operario:       null   (the OPERARIO box is empty)');
   lines.push('');
-  lines.push('4. Each field description below tells you EXACTLY where its label is and what its value should look like.');
-  lines.push('5. Match the value based on SPATIAL PROXIMITY, but only within the correct field box.');
-  lines.push('6. Do NOT confuse similar fields (fecha vs operario vs motivo_rechace). They live in different boxes.');
-  lines.push('7. For handwritten values, transcribe exactly what you see. Preserve spaces and separators.');
+  lines.push('4. STRICT FIELD-BOX READING:');
+  lines.push('   Each value is written INSIDE a specific printed box on the form.');
+  lines.push('   Use the box BORDERS (the printed lines) to decide which field a value belongs to.');
+  lines.push('   Do NOT guess or "spread" a value to fill empty fields.');
+  lines.push('   If a box is EMPTY, return null for that field. An empty box is a valid answer.');
+  lines.push('');
+  lines.push('5. POSITIONAL ANCHORS (use these to locate each field):');
+  lines.push('   - motivo_rechace:  LOWER-LEFT area, under the label "MOTIVO RECHACE"');
+  lines.push('   - fecha:           BOTTOM-LEFT, small box with label "FECHA"');
+  lines.push('   - operario:        BOTTOM-LEFT, small box with label "OPERARIO" (DIRECTLY BELOW fecha)');
+  lines.push('   - observaciones:   BOTTOM-CENTER, wide box with label "OBSERVACIONES"');
+  lines.push('   - cantidad:        MIDDLE-RIGHT, box labeled "CANTIDAD"');
+  lines.push('   - codigo_rechaz:   MIDDLE-LEFT, small box labeled "CÓDIGO RECHAZ"');
+  lines.push('   These boxes are in DIFFERENT physical locations. A value written in one box cannot appear in another.');
+  lines.push('');
+  lines.push('6. Each field description below tells you exactly where its label is and what its value should look like.');
+  lines.push('7. For handwritten values, transcribe exactly what you see.');
   lines.push('8. For signature fields, return exactly "Signed" or "Not Signed".');
-  lines.push('9. If a non-signature field is empty or illegible, use null. NEVER fill an empty field by copying a neighbor.');
+  lines.push('9. If a non-signature field is empty or illegible, use null. NEVER copy a neighbor value to fill it.');
   lines.push('');
   lines.push('Return a valid JSON object with the structure below:');
   lines.push('');
