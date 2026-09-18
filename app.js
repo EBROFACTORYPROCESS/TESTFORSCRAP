@@ -1086,7 +1086,57 @@ function postProcess(parsed) {
   parsed = normalizePartCategory(parsed);
   return parsed;
 }
+/**
+ * Detect and clear duplicated values across sibling fields.
+ * If the same non-trivial string appears in 2+ fields within the same section,
+ * keep only the first occurrence (by a priority order) and null the rest.
+ */
+function dedupeFields(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
 
+  // Sections to check and the priority order of fields within each
+  const dedupeConfig = {
+    section_2: [
+      // Priority: earlier = more likely to be the "owner" of a value
+      'motivo_rechace',
+      'fecha',
+      'operario',
+      'observaciones'
+    ]
+  };
+
+  Object.keys(dedupeConfig).forEach(sectionKey => {
+    const section = obj[sectionKey];
+    if (!section || typeof section !== 'object') return;
+
+    const fields = dedupeConfig[sectionKey];
+    const seen = new Map(); // normalized value → first field that had it
+
+    fields.forEach(fieldKey => {
+      const raw = section[fieldKey];
+      if (raw === null || raw === undefined) return;
+      const s = String(raw).trim();
+      if (s === '') return;
+
+      // Normalize for comparison: lowercase, collapse whitespace
+      const norm = s.toLowerCase().replace(/\s+/g, ' ');
+
+      // Skip short/trivial values (dates, single numbers, codes) — those are legitimately shared shapes
+      const isTrivial = norm.length < 6 || /^\d+$/.test(norm) || /^[\d\/\-\. ]+$/.test(norm);
+      if (isTrivial) return;
+
+      if (seen.has(norm)) {
+        // Duplicate detected → clear this field
+        console.warn(`[dedupe] Clearing duplicated value in ${sectionKey}.${fieldKey} (same as ${sectionKey}.${seen.get(norm)})`);
+        section[fieldKey] = null;
+      } else {
+        seen.set(norm, fieldKey);
+      }
+    });
+  });
+
+  return obj;
+}
 function unwrapSchemaEcho(obj) {
   if (obj === null || typeof obj !== 'object') return obj;
   if (Array.isArray(obj)) return obj.map(unwrapSchemaEcho);
