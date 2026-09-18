@@ -16,19 +16,18 @@ const KEY_PARAMETERS = [
   { path: 'section_1.codigo_conjunto',    label: 'Código Conjunto' },
   { path: 'section_1.codigo_rechaz',      label: 'Código Rechazo' },
   { path: 'section_1.cantidad',           label: 'Cantidad' },
+  { path: 'section_1.codigo_componente',  label: 'Codigo Componente' },
   { path: 'section_1.origen_area_zona',   label: 'Origen Área/Zona' },
   { path: 'section_2.fecha',              label: 'Fecha' },
   { path: 'section_2.operario',           label: 'Operario' },
+  { path: 'section_2.motivo_rechace',      label: 'Motivo rechace' },    
   { path: 'signatures.encargado_linea',   label: 'Signature Encargado Línea' }
 ];
 
 // Fields that should NEVER be classified as "missing" even when empty.
 // Their emptiness is normal for this form.
 const OPTIONAL_FIELDS = [
-  'section_2.observaciones',
-  'section_2.motivo_rechace',
-  'section_1.codigo_componente',
-  'section_1.origen_area_zona'
+  'section_2.observaciones'
 ];
 
 // Fields to hide from the result table and KPI summary.
