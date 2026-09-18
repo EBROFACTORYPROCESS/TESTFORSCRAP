@@ -1084,6 +1084,7 @@ function postProcess(parsed) {
   parsed = unwrapSchemaEcho(parsed);
   parsed = normalizeSignatures(parsed);
   parsed = normalizePartCategory(parsed);
+  parsed = dedupeFields(parsed); 
   return parsed;
 }
 /**
