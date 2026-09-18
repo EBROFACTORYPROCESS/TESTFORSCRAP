@@ -1089,20 +1089,36 @@ function postProcess(parsed) {
 }
 /**
  * Detect and clear duplicated values across sibling fields.
- * If the same non-trivial string appears in 2+ fields within the same section,
- * keep only the first occurrence (by a priority order) and null the rest.
+ * If the same non-empty string appears in 2+ fields within the same section,
+ * keep only the occurrence in the field with the highest priority (per config)
+ * and set the others to null.
+ *
+ * Works on ANY string, including dates and short codes.
+ * Skips only empty strings and nulls.
  */
 function dedupeFields(obj) {
   if (!obj || typeof obj !== 'object') return obj;
 
-  // Sections to check and the priority order of fields within each
+  // Per-section priority order (earlier = keeps the value if a duplicate is found)
   const dedupeConfig = {
+    section_1: [
+      'codigo_conjunto',
+      'codigo_componente',
+      'codigo_rechaz',
+      'cantidad',
+      'origen_area_zona'
+    ],
     section_2: [
-      // Priority: earlier = more likely to be the "owner" of a value
       'motivo_rechace',
       'fecha',
       'operario',
       'observaciones'
+    ],
+    header: [
+      'part_category',
+      'company',
+      'document_type',
+      'red_number'
     ]
   };
 
@@ -1119,15 +1135,8 @@ function dedupeFields(obj) {
       const s = String(raw).trim();
       if (s === '') return;
 
-      // Normalize for comparison: lowercase, collapse whitespace
       const norm = s.toLowerCase().replace(/\s+/g, ' ');
-
-      // Skip short/trivial values (dates, single numbers, codes) — those are legitimately shared shapes
-      const isTrivial = norm.length < 6 || /^\d+$/.test(norm) || /^[\d\/\-\. ]+$/.test(norm);
-      if (isTrivial) return;
-
       if (seen.has(norm)) {
-        // Duplicate detected → clear this field
         console.warn(`[dedupe] Clearing duplicated value in ${sectionKey}.${fieldKey} (same as ${sectionKey}.${seen.get(norm)})`);
         section[fieldKey] = null;
       } else {
@@ -1138,6 +1147,7 @@ function dedupeFields(obj) {
 
   return obj;
 }
+
 function unwrapSchemaEcho(obj) {
   if (obj === null || typeof obj !== 'object') return obj;
   if (Array.isArray(obj)) return obj.map(unwrapSchemaEcho);
@@ -1565,6 +1575,15 @@ function renderResultTable(tasks) {
         } else if (fStatus === 'missing') {
           status = 'missing';
         }
+
+        // Special check: cantidad should normally be 1
+        if (status === 'ok' && h === 'section_1.cantidad') {
+          const cantMsg = validateCantidad(raw);
+          if (cantMsg) {
+            status = 'suspicious';
+            hint = cantMsg;
+          }
+        }
       }
 
       if (r._edited && status === 'ok') status = 'edited';
@@ -1819,7 +1838,17 @@ function renderEditFields(task) {
       input.addEventListener('input', onEditInput);
       input.addEventListener('change', onEditInput);
       fieldEl.appendChild(input);
-
+      
+      // Special hint for cantidad
+      if (path === 'section_1.cantidad') {
+        const cantMsg = validateCantidad(currentValue);
+        if (cantMsg) {
+          const warn = document.createElement('div');
+          warn.style.cssText = 'font-size: 11px; color: #997404; margin-top: 4px; font-weight: 600;';
+          warn.textContent = '⚠️ ' + cantMsg;
+          fieldEl.appendChild(warn);
+        }
+      }
       if (originalValue !== undefined && originalValue !== null &&
           String(originalValue) !== String(currentValue)) {
         const orig = document.createElement('div');
@@ -2418,4 +2447,22 @@ async function pullFileBackFromFolder(sourceDirHandle, targetDirHandle, fileName
   await sourceDirHandle.removeEntry(fileName);
 
   return { handle: destHandle, name: finalName };
+}
+
+/**
+ * Special validation for cantidad — should normally be 1.
+ * Returns null if OK, or a message if there's a concern.
+ */
+function validateCantidad(value) {
+  if (value === null || value === undefined) return null;
+  const s = String(value).trim();
+  if (s === '') return null;
+
+  const n = parseInt(s, 10);
+  if (isNaN(n)) return null; // not a number — handled elsewhere
+
+  if (n > 1) {
+    return `Quantity is ${n} — usually should be 1. Please verify.`;
+  }
+  return null;
 }
