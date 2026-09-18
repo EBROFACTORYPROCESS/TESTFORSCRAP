@@ -713,6 +713,10 @@ async function runBatch(tasks, apiKey) {
       await rateLimiter.wait();
       const json = await extractOneWithRetry(task, apiKey, platform);
       task.json = json;
+      if (json._signatureWarning) {
+        task.signatureWarning = json._signatureWarning;
+        delete json._signatureWarning; // don't pollute the data
+      }
       task.originalJson = JSON.parse(JSON.stringify(json));
       task.status = 'success';
       task.error = null;
@@ -800,6 +804,10 @@ async function retryOne(id) {
     await rateLimiter.wait();
     const json = await extractOneWithRetry(task, apiKey, platform);
     task.json = json;
+    if (json && json._signatureWarning) {
+      task.signatureWarning = json._signatureWarning;
+      delete json._signatureWarning;
+    }
     task.originalJson = JSON.parse(JSON.stringify(json));
     task.edited = false;
     task.status = 'success';
@@ -1084,8 +1092,37 @@ function postProcess(parsed) {
   parsed = normalizeSignatures(parsed);
   parsed = normalizePartCategory(parsed);
   parsed = dedupeFields(parsed); 
+  parsed = flagSuspiciousSignatures(parsed);
   return parsed;
 }
+/**
+ * Sanity check for signatures: if the AI marks ALL THREE signature boxes as "Signed",
+ * that is suspicious. The form is rarely fully signed by all three roles.
+ * We don't force a change (it could legitimately happen), but we log it.
+ *
+ * The main benefit is that if the AI returns all three as "Signed", it is usually
+ * because it saw one signature and spread it. We'll keep the FIRST "Signed" (by priority)
+ * and mark the rest as "Not Signed" ONLY IF the AI's confidence is low. Since we don't
+ * have confidence info, we use a softer approach: keep all, but flag the row.
+ */
+function flagSuspiciousSignatures(parsed) {
+  if (!parsed || typeof parsed !== 'object') return parsed;
+  if (!parsed.signatures || typeof parsed.signatures !== 'object') return parsed;
+
+  const sig = parsed.signatures;
+  const signed = ['inspector', 'visto_bueno_calidad', 'encargado_linea']
+    .filter(k => /^Signed$/i.test(String(sig[k] || '')));
+
+  if (signed.length === 3) {
+    console.warn('[signatures] All three signature boxes marked as "Signed". This is unusual — please verify manually.');
+    // Mark a flag on the object so the UI can show a warning
+    parsed._signatureWarning = 'All three signatures marked as Signed — please verify';
+  }
+
+  return parsed;
+}
+
+
 /**
  * Detect and clear duplicated values across sibling fields.
  * If the same non-empty string appears in 2+ fields within the same section,
@@ -1296,6 +1333,11 @@ function buildKeyParameterSummary(tasks) {
     let level = 'green';
     if (keyMissing > 0) level = 'red';
     else if (otherMissing > 0 || otherFormatIssue > 0) level = 'yellow';
+    // Signature sanity warning
+    if (task.signatureWarning) {
+      reasons.push(task.signatureWarning);
+      if (level === 'green') level = 'yellow';
+    }
 
     statuses[task.id] = { level, reasons };
   });
@@ -1552,6 +1594,10 @@ function renderResultTable(tasks) {
     cells.push(`<td class="row-num">${i + 1}</td>`);
 
     const statusInfo = statuses[r._taskId] || { level: 'green', reasons: [] };
+    if (t.signatureWarning) {
+      statusInfo.reasons.push(t.signatureWarning);
+      if (statusInfo.level === 'green') statusInfo.level = 'yellow';
+    }
     const reasonsText = statusInfo.reasons.length
       ? statusInfo.reasons.join(' · ')
       : 'All fields present and valid';
@@ -2329,6 +2375,10 @@ async function processLocalBatch() {
       await rateLimiter.wait();
       const json = await extractOneWithRetry(task, apiKey, platform);
       task.json = json;
+      if (json && json._signatureWarning) {
+        task.signatureWarning = json._signatureWarning;
+        delete json._signatureWarning;
+      }
       task.originalJson = JSON.parse(JSON.stringify(json));
       task.status = 'success';
       task.error = null;
