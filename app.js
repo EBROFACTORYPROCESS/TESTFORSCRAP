@@ -31,6 +31,9 @@ const downloadExcelBtn = document.getElementById('downloadExcelBtn');
 const geminiModelRow = document.getElementById('geminiModelRow');
 const geminiModelSelect = document.getElementById('geminiModelSelect');
 const geminiModelHint = document.getElementById('geminiModelHint');
+const errorSummary = document.getElementById('errorSummary');
+const rotateLeftBtn = document.getElementById('rotateLeftBtn');
+const rotateRightBtn = document.getElementById('rotateRightBtn');
 
 // Local mode elements
 const imsFolderBtn = document.getElementById('imsFolderBtn');
@@ -73,6 +76,7 @@ let editingTaskId = null;
 let editingDraft = null;
 let localHandles = { input: null, readed: null, error: null };
 let inputMethod = 'folder'; // 'folder' | 'upload'
+let modalRotation = 0;
 
 const zoomState = { scale: 1, naturalW: 0, naturalH: 0, fitMode: null };
 
@@ -178,6 +182,8 @@ function attachEventListeners() {
   zoomInBtn.addEventListener('click', zoomIn);
   zoomOutBtn.addEventListener('click', zoomOut);
   zoomResetBtn.addEventListener('click', zoomReset);
+  rotateLeftBtn.addEventListener('click', () => rotateModalImage(-90));
+  rotateRightBtn.addEventListener('click', () => rotateModalImage(90));
   zoomFitBtn.addEventListener('click', zoomFitWidth);
   zoomFitHBtn.addEventListener('click', zoomFitHeight);
 
@@ -1270,7 +1276,135 @@ function computeQualityScore(tasks) {
 
   return { score, keyPresent, keyTotal, otherPresent, otherTotal, level };
 }
+/**
+ * Group all cell-level issues by type and by field.
+ * Returns:
+ * {
+ *   missing:    { total: N, fields: { [fieldName]: count } },
+ *   format:     { total: N, fields: { [fieldName]: count } },
+ *   suspicious: { total: N, fields: { [fieldName]: count } },
+ *   edited:     { total: N, fields: { [fieldName]: count } }
+ * }
+ */
+function groupIssuesByType(tasks) {
+  const groups = {
+    missing:    { total: 0, fields: {} },
+    format:     { total: 0, fields: {} },
+    suspicious: { total: 0, fields: {} },
+    edited:     { total: 0, fields: {} }
+  };
 
+  tasks.forEach(task => {
+    const flat = flattenJson(task.json || {});
+
+    Object.keys(flat).forEach(path => {
+      if (path === '_file' || path === '_taskId' || path === '_edited') return;
+
+      const value = flat[path];
+      const displayName = getDisplayHeader(path);
+
+      // Missing
+      if (isValueMissing(path, value)) {
+        groups.missing.total++;
+        groups.missing.fields[displayName] = (groups.missing.fields[displayName] || 0) + 1;
+        return;
+      }
+
+      // Suspicious (single char, illegible marks)
+      const suspicious = evaluateCell(value) === 'suspicious';
+      if (suspicious) {
+        groups.suspicious.total++;
+        groups.suspicious.fields[displayName] = (groups.suspicious.fields[displayName] || 0) + 1;
+        return;
+      }
+
+      // Format mismatch
+      const fStatus = checkFormat(path, value);
+      if (fStatus === 'format-mismatch') {
+        groups.format.total++;
+        groups.format.fields[displayName] = (groups.format.fields[displayName] || 0) + 1;
+        return;
+      }
+
+      // Manually edited
+      if (task.edited) {
+        groups.edited.total++;
+        groups.edited.fields[displayName] = (groups.edited.fields[displayName] || 0) + 1;
+      }
+    });
+  });
+
+  return groups;
+}
+/**
+ * Render the Error Summary panel above the results table.
+ */
+function renderErrorSummary(tasks) {
+  const container = document.getElementById('errorSummary');
+  if (!container) return;
+
+  const groups = groupIssuesByType(tasks);
+  const totalIssues =
+    groups.missing.total + groups.format.total + groups.suspicious.total;
+
+  // All good
+  if (totalIssues === 0 && groups.edited.total === 0) {
+    container.classList.add('all-good');
+    container.innerHTML = `
+      <div class="es-title">✅ No issues detected · ${tasks.length} form(s) processed</div>
+    `;
+    container.style.display = 'block';
+    return;
+  }
+
+  container.classList.remove('all-good');
+
+  // Helper to render one group
+  function renderGroup(key, label, icon) {
+    const g = groups[key];
+    if (g.total === 0) return '';
+
+    // Sort fields by count descending
+    const fieldEntries = Object.entries(g.fields)
+      .sort((a, b) => b[1] - a[1]);
+
+    const fieldHTML = fieldEntries.length
+      ? fieldEntries.map(([name, count]) =>
+          `<li class="es-field-item">
+             <span class="es-field-name">${escapeHtml(name)}</span>
+             <span class="es-field-count">${count}</span>
+           </li>`
+        ).join('')
+      : '<li class="es-empty">No fields</li>';
+
+    return `
+      <div class="es-group ${key}">
+        <div class="es-group-header">
+          <span>${icon} ${label}</span>
+          <span class="es-count">${g.total}</span>
+        </div>
+        <ul class="es-field-list">${fieldHTML}</ul>
+      </div>
+    `;
+  }
+
+  const totalCount = totalIssues + groups.edited.total;
+  const titleText =
+    totalIssues > 0
+      ? `⚠️ ${totalIssues} issue(s) detected across ${tasks.length} form(s)`
+      : `✏️ ${groups.edited.total} manually edited cell(s)`;
+
+  container.innerHTML = `
+    <div class="es-title">${titleText}${groups.edited.total && totalIssues ? ` · ${groups.edited.total} manually edited` : ''}</div>
+    <div class="es-groups">
+      ${renderGroup('missing',    'Missing / null',    '🔴')}
+      ${renderGroup('format',     'Format mismatch',   '🔴')}
+      ${renderGroup('suspicious', 'Suspicious value',  '🟡')}
+      ${renderGroup('edited',     'Manually edited',   '✏️')}
+    </div>
+  `;
+  container.style.display = 'block';
+}
 function renderSummaryReport(keyStats, totalRows, tasks) {
   const container = document.getElementById('summaryReport');
   if (!container) return;
@@ -1321,7 +1455,7 @@ function renderSummaryReport(keyStats, totalRows, tasks) {
 function renderResultTable(tasks) {
   const { keyStats, statuses } = buildKeyParameterSummary(tasks);
   renderSummaryReport(keyStats, tasks.length, tasks);
-
+  renderErrorSummary(tasks);
   const rows = tasks.map(t => ({
     _taskId: t.id,
     _file: buildFilePathForTask(t),
@@ -1472,8 +1606,9 @@ function getDisplayHeader(path) {
 // ============================================================
 function applyZoom() {
   const s = zoomState.scale;
-  modalImage.style.transform = `scale(${s})`;
-  modalImage.style.transformOrigin = 'top center';
+  // Preserve the current rotation
+  modalImage.style.transformOrigin = modalRotation === 0 ? 'top center' : 'center center';
+  modalImage.style.transform = `rotate(${modalRotation}deg) scale(${s})`;
   zoomLabel.textContent = `${Math.round(s * 100)}%`;
 }
 
@@ -1497,7 +1632,21 @@ function zoomFitHeight() {
   const containerH = imageScroll.clientHeight - 32;
   setZoom(containerH / zoomState.naturalH, 'height');
 }
+// ============================================================
+//  Modal image rotation (visual only, does not affect AI extraction)
+// ============================================================
+function rotateModalImage(degrees) {
+  modalRotation = (modalRotation + degrees + 360) % 360;
+  applyModalRotation();
+}
 
+function applyModalRotation() {
+  // Combine rotation with the existing zoom transform
+  const s = zoomState.scale;
+  // transform-origin at center makes rotation look natural
+  modalImage.style.transformOrigin = 'center center';
+  modalImage.style.transform = `rotate(${modalRotation}deg) scale(${s})`;
+}  
 // ============================================================
 //  Edit modal
 // ============================================================
@@ -1512,6 +1661,7 @@ function openEditModal(taskId) {
   modalFileLabel.textContent = buildFilePathForTask(task);
 
   zoomState.scale = 1; zoomState.naturalW = 0; zoomState.naturalH = 0; zoomState.fitMode = null;
+  modalRotation = 0;
   zoomLabel.textContent = '100%';
 
   modalImage.onload = () => {
@@ -1536,6 +1686,7 @@ function closeEditModal() {
   zoomState.naturalW = 0;
   zoomState.naturalH = 0;
   zoomState.fitMode = null;
+  modalRotation = 0;
 }
 
 function getFieldHint(path) {
