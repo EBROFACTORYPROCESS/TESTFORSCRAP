@@ -3,7 +3,7 @@
 //  Depends on: config.js (must be loaded first)
 // ============================================================
 
-// ---- DOM references ----
+// ---- DOM references ---- 
 const platformSelect = document.getElementById('platformSelect');
 const apiKeyInput = document.getElementById('apiKey');
 const apiKeyBadge = document.getElementById('apiKeyBadge');
