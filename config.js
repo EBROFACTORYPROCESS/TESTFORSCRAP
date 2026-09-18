@@ -117,16 +117,13 @@ const FORMAT_RULES = {
     // Allowed: letters A-Z, digits 0-9, space, and the separators / - .
     test: v => {
       const s = v.trim();
-      if (s.length < 8) return false; // too short to be a valid code
-      // Reject if it contains forbidden special characters
+      if (s.length < 8) return false;
       if (/[?!@#$%&*()=+\[\]{}<>"';:`~^|\\]/.test(s)) return false;
-      // Must contain at least one digit
       if (!/\d/.test(s)) return false;
       return true;
     },
     hint: 'Expected a long alphanumeric code (letters, digits, spaces, / - .). Must not contain special symbols.'
-  }
-  'section_1.codigo_conjunto': { test: v => /^4[0-9A-Z\s\/\-]{6,}$/i.test(v.trim()), hint: 'Expected a long code starting with "4"' },
+  },
   'section_1.codigo_componente': { test: v => /[A-Za-z]/.test(v) && v.trim().length >= 4, hint: 'Expected a text description like "Pilar B/Sup/Der"' },
   'section_1.codigo_rechaz': { test: v => /^[0-9]{3,5}[A-Z]?$/i.test(v.trim()), hint: 'Expected a short numeric code like "2216"' },
   'section_1.cantidad': { test: v => /^[0-9]{1,3}$/.test(v.trim()), hint: 'Expected a small number like "2"' },
