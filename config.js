@@ -103,8 +103,7 @@ const FIELD_SCHEMA = {
     codigo_conjunto: { type: 'string', description: 'The handwritten value inside the box labeled "CÓDIGO CONJUNTO", in the first row of the form body directly under the colored header band. It is usually a LONG alphanumeric code (typically 8-20 characters) that may start with any letter or digit. It may contain spaces and the characters / - . but should NOT contain special symbols like ? ! @ # $ % & * ( ) + = [ ] { } < >. Example: "40301YS92 AAAG4", "C4071823B", "601234X/2".'
     },    
     codigo_componente: { type: 'string', description: 'The handwritten value inside the box labeled "CÓDIGO COMPONENTE". Usually contains "/" separators, e.g. "Pilar B/Sup/Der".' },
-    codigo_rechaz: { type: 'string', description: 'The handwritten value inside the small box labeled "CÓDIGO RECHAZ". Usually a short numeric code, e.g. "2216".' },
-    cantidad: { type: 'string', description: 'A number handwritten INSIDE the box labeled "CANTIDAD". It is often followed by a horizontal PRINTED LINE (a guard line that prevents someone from adding extra digits later, e.g. converting "1" into "10" or "100"). Do NOT include this line or any trailing dashes in the value — only the digits. Examples: if you see "1" followed by a long line, return "1". If you see "2" followed by a line, return "2". The value is normally 1 to 3 digits.' },
+    codigo_rechaz: { type: 'string', description: 'The handwritten value inside the small box labeled "CÓDIGO RECHAZ", on the LEFT side below "CÓDIGO COMPONENTE". This is a SHORT alphanumeric code of 3-5 characters. It commonly contains BOTH digits AND letters, e.g. "221M", "2216", "22M4", "A104", "2214". IMPORTANT: handwritten letters are easily confused with digits — for example "M" can look like "04", and "O" can look like "0". Read the STROKE SHAPE carefully: the letter "M" has two vertical strokes connected by diagonal strokes; it is NOT two separate digits. If the value looks like "22104" but the last two characters are clearly a handwritten "M", return "221M". Return the exact alphanumeric string as written (letters + digits), preserving the original order.'},    cantidad: { type: 'string', description: 'A number handwritten INSIDE the box labeled "CANTIDAD". It is often followed by a horizontal PRINTED LINE (a guard line that prevents someone from adding extra digits later, e.g. converting "1" into "10" or "100"). Do NOT include this line or any trailing dashes in the value — only the digits. Examples: if you see "1" followed by a long line, return "1". If you see "2" followed by a line, return "2". The value is normally 1 to 3 digits.' },
     origen_area_zona: { type: 'string', description: 'A location code written in the LEFT-MIDDLE of the form. This field is composed of TWO adjacent sub-boxes under the header "ORIGEN": the LEFT sub-box is labeled "AREA" and the RIGHT sub-box is labeled "ZONA". Both sub-boxes usually contain a short code, e.g. AREA="M1" and ZONA="M3". Concatenate them into a single value WITHOUT a space or separator: "M1"+"M3" → "M1M3". If only one sub-box is filled, return only that value (e.g. "M1" or "M3"). If both are empty, also check the "ZONA O LÍNEA" box elsewhere on the form and use that value. Return null only if all three boxes are empty.' }
   },
   section_2: {
@@ -113,18 +112,18 @@ const FIELD_SCHEMA = {
     observaciones: { type: 'string', description: 'Free-text comments handwritten INSIDE the wide box labeled "OBSERVACIONES" at the BOTTOM-CENTER of the form. This box is OFTEN EMPTY. If empty, return null. The value must be physically written INSIDE the OBSERVACIONES box — do NOT copy text from MOTIVO RECHACE, FECHA, or OPERARIO.'},
     operario: { type: 'string', description: 'A short OPERATOR ID handwritten INSIDE the small box labeled "OPERARIO". This box sits DIRECTLY BELOW the "FECHA" box at the BOTTOM-LEFT of the form. Valid values are 3 or 4 digits (e.g. "897", "1234"). IMPORTANT: This box is VERY OFTEN EMPTY. If empty, return null. If the only handwriting in that area is the date (in the FECHA box above), do NOT copy it down — operario must stay null. It is NEVER a date, NEVER a defect description, NEVER a word.' }
   },
-    signatures: {
+  signatures: {
     inspector: {
       type: 'string',
-      description: 'Look INSIDE the box labeled "Inspector" at the BOTTOM-LEFT of the form. Return "Signed" if the box contains ANY of the following: a handwritten signature (cursive strokes), a name, initials, or a RUBBER STAMP mark (e.g. a stamped code like "JE673", a stamped name, or a stamped number). Any visible ink mark inside the box counts as a signature. Return "Not Signed" ONLY if the box is completely empty (only the printed label, no ink at all).'
+      description: 'Look INSIDE the box labeled "Inspector" at the BOTTOM-LEFT of the form. Return "Signed" ONLY if the box contains one of the following: (a) a handwritten CURSIVE signature (continuous flowing strokes forming a name or initials), or (b) a RUBBER STAMP mark consisting of approximately 5 characters (e.g. "JE673" = 2 letters + 3 digits, or a similar stamped identifier). Return "Not Signed" if the box contains: only a printed red line/underline, only a single isolated letter (e.g. "A"), only a short numeric code, only the printed label, or nothing at all. A single letter like "A" is NOT a signature. A decorative line is NOT a signature.'
     },
     visto_bueno_calidad: {
       type: 'string',
-      description: 'Look INSIDE the box labeled "Calidad" or "Vº Bº C. CALIDAD" at the BOTTOM-CENTER of the form. Return "Signed" if the box contains ANY of the following: a handwritten signature, a name, initials, or a RUBBER STAMP mark. Any visible ink mark inside the box counts as a signature. Return "Not Signed" ONLY if the box is completely empty (only the printed label, no ink at all).'
+      description: 'Look INSIDE the box labeled "Calidad" or "Vº Bº C. CALIDAD" at the BOTTOM-CENTER of the form. Return "Signed" ONLY if the box contains one of the following: (a) a handwritten CURSIVE signature (continuous flowing strokes forming a name or initials), or (b) a RUBBER STAMP mark consisting of approximately 5 characters (e.g. "JE673" = 2 letters + 3 digits, or a similar stamped identifier). Return "Not Signed" if the box contains: only a printed red line/underline, only a single isolated letter (e.g. "A"), only a short numeric code, only the printed label, or nothing at all.'
     },
     encargado_linea: {
       type: 'string',
-      description: 'Look INSIDE the box labeled "Encargado" or "ENCARGADO LÍNEA" at the BOTTOM-RIGHT of the form. Return "Signed" if the box contains ANY of the following: a handwritten signature, a name, initials, or a RUBBER STAMP mark such as "JE673" (a stamp often consists of 2-3 letters followed by 3-4 digits, printed in a uniform font unlike handwriting). Any visible ink mark inside the box counts as a signature. Return "Not Signed" ONLY if the box is completely empty. Each of the three signature boxes is INDEPENDENT — a signature in one box does NOT imply the others are signed.'
+      description: 'Look INSIDE the box labeled "Encargado" or "ENCARGADO LÍNEA" at the BOTTOM-RIGHT of the form. Return "Signed" ONLY if the box contains one of the following: (a) a handwritten CURSIVE signature (continuous flowing strokes forming a name or initials), or (b) a RUBBER STAMP mark consisting of approximately 5 characters (e.g. "JE673" = 2 letters + 3 digits). Return "Not Signed" if the box contains: only a printed red line/underline, only a single isolated letter (e.g. "A"), only a short numeric code, only the printed label, or nothing at all. Each of the three signature boxes is INDEPENDENT — a signature in one box does NOT imply the others are signed.'
     }
   }
 };
@@ -149,7 +148,10 @@ const FORMAT_RULES = {
     hint: 'Expected a long alphanumeric code (letters, digits, spaces, / - .). Must not contain special symbols.'
   },
   'section_1.codigo_componente': { test: v => /[A-Za-z]/.test(v) && v.trim().length >= 4, hint: 'Expected a text description like "Pilar B/Sup/Der"' },
-  'section_1.codigo_rechaz': { test: v => /^[0-9]{3,5}[A-Z]?$/i.test(v.trim()), hint: 'Expected a short numeric code like "2216"' },
+  'section_1.codigo_rechaz': {
+    test: v => /^[A-Z0-9]{3,5}$/i.test(v.trim().replace(/\s+/g, '')),
+    hint: 'Expected a 3-5 character alphanumeric code (digits and/or letters), e.g. "2216", "221M", "A104".'
+  },
   'section_1.cantidad': { test: v => /^[0-9]{1,3}$/.test(v.trim()), hint: 'Expected a small number like "2"' },
   'section_1.origen_area_zona': { test: v => /^[A-Z0-9][A-Z0-9\s\-]{1,11}$/i.test(v.trim()), hint: 'Expected a short alphanumeric code like "M1M3" or "M1" or "15A".' },
   'section_2.motivo_rechace': { test: v => /^[0-9A-Z]{3,5}$/i.test(v.replace(/\s+/g, '')), hint: 'Expected a 3-5 character rejecting code' },
@@ -227,17 +229,17 @@ function buildPromptText() {
   lines.push('     - "Inspector"       (bottom-left)');
   lines.push('     - "Calidad" / "Vº Bº C. CALIDAD"  (bottom-center)');
   lines.push('     - "Encargado" / "ENCARGADO LÍNEA" (bottom-right)');
-  lines.push('   For each box, return exactly "Signed" or "Not Signed".');
-  lines.push('   A box counts as "Signed" if it contains ANY ink mark, including:');
-  lines.push('     - A handwritten cursive signature');
-  lines.push('     - A name or initials');
-  lines.push('     - A RUBBER STAMP mark (e.g. a code like "JE673", a stamped name, a stamped number)');
-  lines.push('   A rubber stamp is a uniform, printed-looking mark — different from handwriting — but it IS a valid signature.');
-  lines.push('   Return "Not Signed" ONLY if the box is completely empty (just the printed label, no ink).');
-  lines.push('   The three boxes are INDEPENDENT:');
-  lines.push('     - If only the Encargado box has a stamp like "JE673", then inspector = "Not Signed", calidad = "Not Signed", encargado = "Signed".');
-  lines.push('     - DO NOT mark all three as "Signed" just because one of them is signed.');
-  lines.push('     - DO NOT mark a box as "Signed" because there is ink somewhere else on the form.');
+  lines.push('   Return "Signed" ONLY IF the box contains one of:');
+  lines.push('     (a) a handwritten CURSIVE signature — continuous flowing strokes forming a name or initials,');
+  lines.push('     (b) a RUBBER STAMP — a stamped mark of about 5 characters, typically 2 letters + 3 digits (e.g. "JE673"), printed in a uniform font.');
+  lines.push('   Return "Not Signed" for ALL OTHER cases, including:');
+  lines.push('     - the box is empty (only the printed label)');
+  lines.push('     - the box contains only a printed red line or underline');
+  lines.push('     - the box contains only a single isolated letter (e.g. "A")');
+  lines.push('     - the box contains only a short numeric code');
+  lines.push('     - the box contains a defect word or description');
+  lines.push('   A single letter is NOT a signature. A red line is NOT a signature. Only cursive writing or a 5-character stamp counts.');
+  lines.push('   The three boxes are INDEPENDENT — a signature or stamp in one box does NOT imply the others are signed.');
   lines.push('9. If a non-signature field is empty or illegible, use null. NEVER copy a neighbor value to fill it.');
   lines.push('');
   lines.push('Return a valid JSON object with the structure below:');
