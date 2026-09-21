@@ -124,14 +124,18 @@ const zoomState = { scale: 1, naturalW: 0, naturalH: 0, fitMode: null };
 
 function attachEventListeners() {
   // Platform
-  autoProcessToggle.addEventListener('change', () => {
-    autoProcessEnabled = autoProcessToggle.checked;
-    autoProcessToggleLocal.checked = autoProcessEnabled;
-  });
-  autoProcessToggleLocal.addEventListener('change', () => {
-    autoProcessEnabled = autoProcessToggleLocal.checked;
-    autoProcessToggle.checked = autoProcessEnabled;
-  });
+  if (autoProcessToggle) {
+    autoProcessToggle.addEventListener('change', () => {
+      autoProcessEnabled = autoProcessToggle.checked;
+      if (autoProcessToggleLocal) autoProcessToggleLocal.checked = autoProcessEnabled;
+    });
+  }
+  if (autoProcessToggleLocal) {
+    autoProcessToggleLocal.addEventListener('change', () => {
+      autoProcessEnabled = autoProcessToggleLocal.checked;
+      if (autoProcessToggle) autoProcessToggle.checked = autoProcessEnabled;
+    });
+  }
 
   geminiModelSelect.addEventListener('change', () => {
     localStorage.setItem(GEMINI_MODEL_STORAGE, geminiModelSelect.value);
@@ -750,6 +754,15 @@ function renderQueue() {
   });
 }
 
+let _renderQueueThrottle = null;
+function renderQueueThrottled() {
+  if (_renderQueueThrottle) return;
+  _renderQueueThrottle = setTimeout(() => {
+    renderQueue();
+    _renderQueueThrottle = null;
+  }, 300);
+}
+
 function statusLabel(s) {
   return {
     waiting: 'Waiting', processing: 'Processing', success: 'Success',
@@ -793,6 +806,21 @@ async function onExtractClick() {
   const pending = queue.filter(t => t.status === 'waiting');
   if (!pending.length) return;
   await runBatch(pending, apiKey);
+}
+
+let _autoStartTimer = null;
+function scheduleAutoStart() {
+  if (typeof autoProcessEnabled === 'undefined' || !autoProcessEnabled) return;
+  if (isRunning) return;
+  if (!apiKeyInput.value.trim()) return;
+
+  clearTimeout(_autoStartTimer);
+  _autoStartTimer = setTimeout(() => {
+    const hasPending = queue.some(t => t.status === 'waiting');
+    if (hasPending && !isRunning) {
+      onExtractClick();
+    }
+  }, 1500);
 }
 
 async function onRetryAllClick() {
