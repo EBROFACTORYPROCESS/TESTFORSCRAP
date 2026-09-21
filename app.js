@@ -1090,6 +1090,7 @@ function stripFences(text) {
 function postProcess(parsed) {
   parsed = unwrapSchemaEcho(parsed);
   parsed = normalizeSignatures(parsed);
+  parsed = sanitizeSignatures(parsed); 
   parsed = normalizeTicketCategory(parsed);
   parsed = dedupeFields(parsed);
   parsed = flagSuspiciousSignatures(parsed);
