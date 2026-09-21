@@ -4,6 +4,8 @@
 // ============================================================
 
 // ---- DOM references ---- 
+const autoProcessToggle = document.getElementById('autoProcessToggle');
+const autoProcessToggleLocal = document.getElementById('autoProcessToggleLocal');
 const platformSelect = document.getElementById('platformSelect');
 const apiKeyInput = document.getElementById('apiKey');
 const apiKeyBadge = document.getElementById('apiKeyBadge');
@@ -69,6 +71,7 @@ const zoomFitBtn = document.getElementById('zoomFitBtn');
 const zoomFitHBtn = document.getElementById('zoomFitHBtn');
 
 // ---- State ----
+let autoProcessEnabled = true;
 let queue = [];
 let isRunning = false;
 let idCounter = 0;
@@ -121,9 +124,13 @@ const zoomState = { scale: 1, naturalW: 0, naturalH: 0, fitMode: null };
 
 function attachEventListeners() {
   // Platform
-  platformSelect.addEventListener('change', () => {
-    localStorage.setItem(PLATFORM_STORAGE, platformSelect.value);
-    updatePlatformUI();
+  autoProcessToggle.addEventListener('change', () => {
+    autoProcessEnabled = autoProcessToggle.checked;
+    autoProcessToggleLocal.checked = autoProcessEnabled;
+  });
+  autoProcessToggleLocal.addEventListener('change', () => {
+    autoProcessEnabled = autoProcessToggleLocal.checked;
+    autoProcessToggle.checked = autoProcessEnabled;
   });
 
   geminiModelSelect.addEventListener('change', () => {
@@ -599,20 +606,17 @@ function hideCompressProgress() {
   if (wrap) wrap.style.display = 'none';
 }
 async function addFiles(files) {
-  
-  const isHeic = /\.(heic|heif)$/i.test(originalFile.name);
-  const phase = isHeic ? '🔄 Converting HEIC' : '📦 Compressing';
-  showCompressProgress(current, total, originalFile.name, phase);
-  
   const imageFiles = Array.from(files).filter(f =>
     f.type.startsWith('image/') ||
     /\.(heic|heif)$/i.test(f.name)
   );
+
   if (!imageFiles.length) {
     showStatus('Please select image files.', 'error');
     return;
   }
-    const heicCount = imageFiles.filter(f =>
+
+  const heicCount = imageFiles.filter(f =>
     /\.(heic|heif)$/i.test(f.name)
   ).length;
 
@@ -627,14 +631,27 @@ async function addFiles(files) {
 
   for (const originalFile of imageFiles) {
     current++;
-    showCompressProgress(current, total, originalFile.name);
+
+    const isHeic = /\.(heic|heif)$/i.test(originalFile.name);
+    const phase = isHeic ? '🔄 Converting HEIC' : '📦 Compressing';
+    showCompressProgress(current, total, originalFile.name, phase);
 
     const file = await normalizeImageFormat(originalFile);
+
     const task = {
-      id: ++idCounter, file, previewUrl: null,
-      status: 'waiting', json: null, originalJson: null, edited: false, error: null,
-      resizedBlob: null, resizedDataUrl: null, resizeInfo: null,
+      id: ++idCounter,
+      file,
+      previewUrl: null,
+      status: 'waiting',
+      json: null,
+      originalJson: null,
+      edited: false,
+      error: null,
+      resizedBlob: null,
+      resizedDataUrl: null,
+      resizeInfo: null,
     };
+
     try {
       const resized = await resizeImage(file);
       task.resizedBlob = resized.blob;
@@ -651,7 +668,15 @@ async function addFiles(files) {
       task.previewUrl = URL.createObjectURL(file);
       task.resizeInfo = { error: 'Resize failed, using original' };
     }
+
     queue.push(task);
+
+    // Live update: render the queue after each file
+    renderQueueThrottled();
+    updateButtonState();
+
+    // Yield to the browser so it can repaint between files
+    await new Promise(r => setTimeout(r, 0));
   }
 
   hideCompressProgress();
@@ -669,6 +694,9 @@ async function addFiles(files) {
     `Total size: ${totalOrigKB} KB → ${totalNewKB} KB.`,
     'success'
   );
+
+  // Auto-start processing after a short debounce
+  scheduleAutoStart();
 }
 
 function updateButtonState() {
@@ -799,7 +827,7 @@ async function runBatch(tasks, apiKey) {
   for (const task of tasks) {
     if (task.status === 'cancelled') continue;
     task.status = 'processing';
-    renderQueue();
+    renderQueueThrottled();
 
     try {
       await rateLimiter.wait();
@@ -807,7 +835,7 @@ async function runBatch(tasks, apiKey) {
       task.json = json;
       if (json._signatureWarning) {
         task.signatureWarning = json._signatureWarning;
-        delete json._signatureWarning; // don't pollute the data
+        delete json._signatureWarning;
       }
       task.originalJson = JSON.parse(JSON.stringify(json));
       task.status = 'success';
@@ -822,7 +850,19 @@ async function runBatch(tasks, apiKey) {
 
     done++;
     progressBar.style.width = `${(done / tasks.length) * 100}%`;
-    renderQueue();
+    renderQueueThrottled();
+
+    // Live result table update — refresh after each completed item
+    const successTasks = queue.filter(t => t.status === 'success' && t.json);
+    if (successTasks.length) {
+      renderResultTable(successTasks);
+      resultSection.style.display = 'block';
+    }
+
+    summaryEl.style.display = 'block';
+    summaryEl.innerHTML =
+      `✅ Succeeded: ${success} · ❌ Failed: ${failed} · ⏳ Remaining: ${tasks.length - done} / ${tasks.length}`;
+
     updateButtonState();
   }
 
@@ -830,6 +870,8 @@ async function runBatch(tasks, apiKey) {
   updateButtonState();
 
   if (platform === 'deepseek') fetchDeepSeekBalance();
+
+  renderQueue();
 
   summaryEl.style.display = 'block';
   summaryEl.innerHTML = `✅ Succeeded: ${success} · ❌ Failed: ${failed} · Total: ${tasks.length}`;
@@ -846,6 +888,9 @@ async function runBatch(tasks, apiKey) {
   } else {
     showStatus('❌ All failed. Check your API Key or network.', 'error');
   }
+
+  // If new files were added while running, auto-start again
+  scheduleAutoStart();
 }
 
 async function retryOne(id) {
@@ -2433,17 +2478,22 @@ async function loadLocalFiles() {
       return;
     }
 
+    // Reset queue for the new folder load
     queue = [];
     idCounter = 0;
-    
+
     const total = files.length;
     let current = 0;
-    
+
     for (const f of files) {
       current++;
-      showCompressProgress(current, total, f.name);
-      // Convert HEIC/HEIF to JPEG if needed
+
+      const isHeic = /\.(heic|heif)$/i.test(f.name);
+      const phase = isHeic ? '🔄 Converting HEIC' : '📦 Compressing';
+      showCompressProgress(current, total, f.name, phase);
+
       const normalizedFile = await normalizeImageFormat(f.file);
+
       const task = {
         id: ++idCounter,
         file: normalizedFile,
@@ -2478,7 +2528,15 @@ async function loadLocalFiles() {
       }
 
       queue.push(task);
+
+      // Live update
+      renderQueueThrottled();
+      updateButtonState();
+
+      // Yield to the browser so it can repaint between files
+      await new Promise(r => setTimeout(r, 0));
     }
+
     hideCompressProgress();
     renderQueue();
     updateButtonState();
@@ -2495,20 +2553,15 @@ async function loadLocalFiles() {
       `✅ Loaded ${queue.length} image(s) from "${localHandles.input.name}" · ` +
       `${totalOrigKB} KB → ${totalNewKB} KB`;
     localStatus.className = 'local-status connected';
+
+    // Auto-start processing after a short debounce
+    scheduleAutoStart();
+
   } catch (err) {
     console.error('loadLocalFiles error:', err);
     localStatus.textContent = `❌ ${err.message}`;
     localStatus.className = 'local-status error';
   }
-}
-
-function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
 }
 
 async function processLocalBatch() {
