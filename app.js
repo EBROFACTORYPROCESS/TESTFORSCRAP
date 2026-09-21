@@ -592,7 +592,6 @@ function showCompressProgress(current, total, fileName) {
   wrap.style.display = 'block';
   bar.style.width = `${pct}%`;
   label.textContent = `Compressing ${current} / ${total} (${pct}%) — ${fileName}`;
-  label.textContent = `${phase} ${current} / ${total} (${pct}%) — ${fileName}`;
 }
 
 function hideCompressProgress() {
