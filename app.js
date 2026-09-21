@@ -505,34 +505,34 @@ function getMaxSize() {
  *
  * Uses the `heicraft` library (loaded via CDN in index.html).
  */
+/**
+ * If the file is HEIC/HEIF, convert it to JPEG before processing.
+ * Otherwise, return the file unchanged.
+ *
+ * Uses the `heic2any` library (loaded via <script> in index.html).
+ */
 async function normalizeImageFormat(file) {
   try {
-    // Quick extension check (cheap, avoids loading the WASM decoder unnecessarily)
+    // Quick extension check
     const name = (file.name || '').toLowerCase();
     const looksLikeHeic = name.endsWith('.heic') || name.endsWith('.heif');
 
-    // Content-based check (catches HEIC files renamed to .jpg)
-    let isHeic = looksLikeHeic;
-    if (!isHeic && typeof heicraft !== 'undefined' && heicraft.isHeic) {
-      try {
-        isHeic = await heicraft.isHeic(file);
-      } catch (e) {
-        // Ignore detection errors and assume not HEIC
-      }
-    }
-
-    if (!isHeic) return file;
+    if (!looksLikeHeic) return file;
 
     console.log(`[HEIC] Converting ${file.name} to JPEG...`);
 
-    const result = await heicraft.convertHeic(file, {
-      format: 'jpeg',
+    // heic2any API: returns a Blob or an array of Blobs (for animated HEIC)
+    const result = await heic2any({
+      blob: file,
+      toType: 'image/jpeg',
       quality: 0.92
     });
 
-    // Build a new File from the converted Blob
+    // heic2any may return an array for multi-frame images; take the first frame
+    const convertedBlob = Array.isArray(result) ? result[0] : result;
+
     const newName = file.name.replace(/\.(heic|heif)$/i, '.jpg');
-    const convertedFile = new File([result.data], newName, {
+    const convertedFile = new File([convertedBlob], newName, {
       type: 'image/jpeg',
       lastModified: file.lastModified || Date.now()
     });
@@ -546,7 +546,6 @@ async function normalizeImageFormat(file) {
 
   } catch (err) {
     console.warn(`[HEIC] Conversion failed for ${file.name}:`, err);
-    // Fall back to the original file so the user sees the downstream error
     return file;
   }
 }
