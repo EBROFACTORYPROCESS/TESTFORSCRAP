@@ -80,6 +80,8 @@ let editingDraft = null;
 let localHandles = { input: null, readed: null, error: null };
 let inputMethod = 'folder'; // 'folder' | 'upload'
 let modalRotation = 0;
+let _producerActive = false;      // is the conversion loop still running?
+let _consumerRunning = false;     // is the AI consumer loop running?
 
 const zoomState = { scale: 1, naturalW: 0, naturalH: 0, fitMode: null };
 
@@ -630,6 +632,20 @@ async function addFiles(files) {
 
   showStatus(msg, 'loading');
 
+  // ──────────────────────────────────────────────────────────
+  //  Start the consumer BEFORE conversion, so AI processing
+  //  can begin as soon as the first task is added to the queue.
+  // ──────────────────────────────────────────────────────────
+  const apiKey = apiKeyInput.value.trim();
+  const platform = getCurrentPlatform();
+
+  if (apiKey && autoProcessEnabled && !_consumerRunning) {
+    _producerActive = true;
+    startConsumer(apiKey, platform);   // do NOT await
+  } else {
+    _producerActive = true;
+  }
+
   const total = imageFiles.length;
   let current = 0;
 
@@ -675,16 +691,17 @@ async function addFiles(files) {
 
     queue.push(task);
 
-    // Live update: render the queue after each file
     renderQueueThrottled();
     updateButtonState();
 
-    // Yield to the browser so it can repaint between files
+    // Yield to browser so UI can repaint
     await new Promise(r => setTimeout(r, 0));
   }
 
-  hideCompressProgress();
+  // Conversion finished
+  _producerActive = false;
 
+  hideCompressProgress();
   renderQueue();
   updateButtonState();
 
@@ -698,18 +715,17 @@ async function addFiles(files) {
     `Total size: ${totalOrigKB} KB → ${totalNewKB} KB.`,
     'success'
   );
-
-  // Auto-start processing after a short debounce
-  scheduleAutoStart();
 }
 
 function updateButtonState() {
   const hasPending = queue.some(t => t.status === 'waiting');
   const hasFailed = queue.some(t => t.status === 'error');
   const hasKey = !!apiKeyInput.value.trim();
-  extractBtn.disabled = isRunning || !hasPending || !hasKey;
-  retryAllBtn.disabled = isRunning || !hasFailed || !hasKey;
-  clearBtn.disabled = isRunning || queue.length === 0;
+  const busy = isRunning || _consumerRunning;
+
+  extractBtn.disabled = busy || !hasPending || !hasKey;
+  retryAllBtn.disabled = busy || !hasFailed || !hasKey;
+  clearBtn.disabled = busy || queue.length === 0;
 }
 
 function showStatus(msg, type = '') {
@@ -754,6 +770,9 @@ function renderQueue() {
   });
 }
 
+// ============================================================
+//  Throttled queue render (max once per 300ms)
+// ============================================================
 let _renderQueueThrottle = null;
 function renderQueueThrottled() {
   if (_renderQueueThrottle) return;
@@ -796,35 +815,167 @@ const rateLimiter = {
 };
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-// ============================================================
-//  Batch flow
-// ============================================================
 async function onExtractClick() {
-  if (isRunning) return;
   const apiKey = apiKeyInput.value.trim();
-  if (!apiKey) return;
-  const pending = queue.filter(t => t.status === 'waiting');
-  if (!pending.length) return;
-  await runBatch(pending, apiKey);
+  if (!apiKey) {
+    showStatus('Please enter your API Key first.', 'error');
+    return;
+  }
+  if (_consumerRunning) {
+    showStatus('Processing is already running.', 'warning');
+    return;
+  }
+  const hasPending = queue.some(t => t.status === 'waiting');
+  if (!hasPending) {
+    showStatus('No pending files to process.', 'error');
+    return;
+  }
+
+  const platform = getCurrentPlatform();
+  _producerActive = false;   // manual trigger: no producer is running
+  startConsumer(apiKey, platform);
+}
+// ============================================================
+//  Consumer loop — continuously processes waiting tasks
+//  Runs until no more waiting tasks arrive AND producer is idle
+// ============================================================
+async function startConsumer(apiKey, platform) {
+  if (_consumerRunning) return;
+  _consumerRunning = true;
+
+  console.log('[consumer] started');
+
+  // Hide previous result panel (it will reappear when the first result lands)
+  resultSection.style.display = 'none';
+  progressWrap.style.display = 'block';
+  summaryEl.style.display = 'none';
+
+  let lastProgressUpdate = 0;
+
+  while (true) {
+    const task = queue.find(t => t.status === 'waiting');
+
+    if (!task) {
+      // Nothing waiting right now.
+      // If the producer is still running, wait a bit and check again.
+      if (_producerActive) {
+        await sleep(300);
+        continue;
+      }
+
+      // Producer is done — check once more after a short grace period
+      // in case a task was pushed at the last moment.
+      await sleep(500);
+      const stillWaiting = queue.some(t => t.status === 'waiting');
+      if (!stillWaiting) break;
+      else continue;
+    }
+
+    task.status = 'processing';
+    renderQueueThrottled();
+
+    try {
+      await rateLimiter.wait();
+      const json = await extractOneWithRetry(task, apiKey, platform);
+      task.json = json;
+      if (json && json._signatureWarning) {
+        task.signatureWarning = json._signatureWarning;
+        delete json._signatureWarning;
+      }
+      task.originalJson = JSON.parse(JSON.stringify(json));
+      task.status = 'success';
+      task.error = null;
+    } catch (err) {
+      console.error(task.file.name, err);
+      task.error = err.message || 'Unknown error';
+      task.status = 'error';
+    }
+
+    // Live update queue
+    renderQueueThrottled();
+
+    // Live update result table (only if we have any success)
+    const successTasks = queue.filter(t => t.status === 'success' && t.json);
+    if (successTasks.length) {
+      renderResultTable(successTasks);
+      resultSection.style.display = 'block';
+    }
+
+    // Update summary + progress bar (throttled to avoid excessive DOM writes)
+    const now = Date.now();
+    if (now - lastProgressUpdate > 500) {
+      lastProgressUpdate = now;
+
+      const totalTracked = queue.filter(t =>
+        t.status === 'success' || t.status === 'error' || t.status === 'processing'
+      ).length;
+      const processed = queue.filter(t =>
+        t.status === 'success' || t.status === 'error'
+      ).length;
+
+      if (totalTracked > 0) {
+        progressBar.style.width = `${Math.round((processed / queue.length) * 100)}%`;
+      }
+
+      const successCount = queue.filter(t => t.status === 'success').length;
+      const failedCount = queue.filter(t => t.status === 'error').length;
+      const waitingCount = queue.filter(t => t.status === 'waiting').length;
+
+      summaryEl.style.display = 'block';
+      summaryEl.innerHTML =
+        `✅ Succeeded: ${successCount} · ❌ Failed: ${failedCount} · ⏳ Waiting: ${waitingCount}`;
+    }
+
+    updateButtonState();
+  }
+
+  _consumerRunning = false;
+  console.log('[consumer] stopped');
+
+  if (platform === 'deepseek') fetchDeepSeekBalance();
+
+  // Final render
+  renderQueue();
+  progressBar.style.width = '100%';
+
+  const successCount = queue.filter(t => t.status === 'success').length;
+  const failedCount = queue.filter(t => t.status === 'error').length;
+
+  summaryEl.style.display = 'block';
+  summaryEl.innerHTML = `✅ Succeeded: ${successCount} · ❌ Failed: ${failedCount} · Total: ${queue.length}`;
+
+  const successTasks = queue.filter(t => t.status === 'success' && t.json);
+  if (successTasks.length) {
+    renderResultTable(successTasks);
+    resultSection.style.display = 'block';
+    showStatus(
+      `🎉 Done. Succeeded: ${successCount}, Failed: ${failedCount}.` +
+      (failedCount ? ' Use "Retry Failed" or per-row Retry to try again.' : ''),
+      successCount ? 'success' : 'error'
+    );
+  } else {
+    showStatus('❌ All failed. Check your API Key or network.', 'error');
+  }
+
+  updateButtonState();
 }
 
-let _autoStartTimer = null;
 function scheduleAutoStart() {
-  if (typeof autoProcessEnabled === 'undefined' || !autoProcessEnabled) return;
-  if (isRunning) return;
-  if (!apiKeyInput.value.trim()) return;
+//  if (typeof autoProcessEnabled === 'undefined' || !autoProcessEnabled) return;
+//  if (isRunning) return;
+//  if (!apiKeyInput.value.trim()) return;
 
-  clearTimeout(_autoStartTimer);
-  _autoStartTimer = setTimeout(() => {
-    const hasPending = queue.some(t => t.status === 'waiting');
-    if (hasPending && !isRunning) {
-      onExtractClick();
-    }
-  }, 1500);
+//  clearTimeout(_autoStartTimer);
+//  _autoStartTimer = setTimeout(() => {
+//    const hasPending = queue.some(t => t.status === 'waiting');
+//    if (hasPending && !isRunning) {
+//      onExtractClick();
+//    }
+//  }, 1500);
 }
 
 async function onRetryAllClick() {
-  if (isRunning) return;
+  if (_consumerRunning) return;
   const apiKey = apiKeyInput.value.trim();
   if (!apiKey) return;
   const failed = queue.filter(t => t.status === 'error');
@@ -839,9 +990,11 @@ async function onRetryAllClick() {
   });
   renderQueue();
   updateButtonState();
-  await runBatch(failed, apiKey);
-}
 
+  const platform = getCurrentPlatform();
+  _producerActive = false;
+  startConsumer(apiKey, platform);
+}
 async function runBatch(tasks, apiKey) {
   isRunning = true;
   updateButtonState();
@@ -922,6 +1075,10 @@ async function runBatch(tasks, apiKey) {
 }
 
 async function retryOne(id) {
+  if (_consumerRunning) {
+    showStatus('Consumer is running. Please wait until it finishes before retrying a single item.', 'warning');
+    return;
+  }
   if (isRunning) return;
   const apiKey = apiKeyInput.value.trim();
   if (!apiKey) { showStatus('Please enter your API Key first.', 'error'); return; }
@@ -2510,6 +2667,19 @@ async function loadLocalFiles() {
     queue = [];
     idCounter = 0;
 
+    // ──────────────────────────────────────────────────────────
+    //  Start the consumer BEFORE conversion begins.
+    // ──────────────────────────────────────────────────────────
+    const apiKey = apiKeyInput.value.trim();
+    const platform = getCurrentPlatform();
+
+    if (apiKey && autoProcessEnabled && !_consumerRunning) {
+      _producerActive = true;
+      startConsumer(apiKey, platform);   // do NOT await
+    } else {
+      _producerActive = true;
+    }
+
     const total = files.length;
     let current = 0;
 
@@ -2557,13 +2727,14 @@ async function loadLocalFiles() {
 
       queue.push(task);
 
-      // Live update
       renderQueueThrottled();
       updateButtonState();
 
-      // Yield to the browser so it can repaint between files
       await new Promise(r => setTimeout(r, 0));
     }
+
+    // Conversion done
+    _producerActive = false;
 
     hideCompressProgress();
     renderQueue();
@@ -2582,18 +2753,20 @@ async function loadLocalFiles() {
       `${totalOrigKB} KB → ${totalNewKB} KB`;
     localStatus.className = 'local-status connected';
 
-    // Auto-start processing after a short debounce
-    scheduleAutoStart();
-
   } catch (err) {
     console.error('loadLocalFiles error:', err);
     localStatus.textContent = `❌ ${err.message}`;
     localStatus.className = 'local-status error';
+    _producerActive = false;
   }
 }
 
 async function processLocalBatch() {
-  if (isRunning) return;
+  if (_consumerRunning) {
+    showStatus('Processing is already running.', 'warning');
+    return;
+  }
+
   const apiKey = apiKeyInput.value.trim();
   if (!apiKey) {
     showStatus('Please enter your API Key first.', 'error');
@@ -2604,8 +2777,8 @@ async function processLocalBatch() {
     return;
   }
 
-  const pending = queue.filter(t => t.status === 'waiting');
-  if (!pending.length) {
+  const hasPending = queue.some(t => t.status === 'waiting');
+  if (!hasPending) {
     showStatus('No pending files to process.', 'error');
     return;
   }
@@ -2617,82 +2790,10 @@ async function processLocalBatch() {
     return;
   }
 
-  isRunning = true;
-  updateButtonState();
-  updateLocalModeButtons();
-  resultSection.style.display = 'none';
-  progressWrap.style.display = 'block';
-  summaryEl.style.display = 'none';
-
   const platform = getCurrentPlatform();
-  let done = 0, success = 0, failed = 0;
-
-  for (const task of pending) {
-    if (task.status === 'cancelled') continue;
-    task.status = 'processing';
-    renderQueue();
-
-    // Step 1: Extract with AI
-    try {
-      await rateLimiter.wait();
-      const json = await extractOneWithRetry(task, apiKey, platform);
-      task.json = json;
-      if (json && json._signatureWarning) {
-        task.signatureWarning = json._signatureWarning;
-        delete json._signatureWarning;
-      }
-      task.originalJson = JSON.parse(JSON.stringify(json));
-      task.status = 'success';
-      task.error = null;
-      success++;
-    } catch (err) {
-      console.error(task.file.name, err);
-      task.error = err.message || 'Unknown error';
-      task.status = 'error';
-      failed++;
-    }
-
-    // Step 2: Move file to target folder
-    try {
-      const targetHandle = task.status === 'success' ? localHandles.readed : localHandles.error;
-      const movedName = await moveLocalFile(task, targetHandle);
-      task.movedTo = movedName;
-      task.currentLocation = task.status === 'success' ? 'readed' : 'error';
-    } catch (moveErr) {
-      console.error('Move failed:', task.localName, moveErr);
-      task.error = (task.error ? task.error + ' | ' : '') + 'Move failed: ' + moveErr.message;
-    }
-
-    done++;
-    progressBar.style.width = `${(done / pending.length) * 100}%`;
-    renderQueue();
-    updateButtonState();
-  }
-
-  isRunning = false;
-  updateButtonState();
-  updateLocalModeButtons();
-
-  if (platform === 'deepseek') fetchDeepSeekBalance();
-
-  summaryEl.style.display = 'block';
-  summaryEl.innerHTML =
-    `✅ Succeeded: ${success} → readed · ` +
-    `❌ Failed: ${failed} → error · ` +
-    `Total: ${pending.length}`;
-
-  const successTasks = queue.filter(t => t.status === 'success' && t.json);
-  if (successTasks.length) {
-    renderResultTable(successTasks);
-    resultSection.style.display = 'block';
-  }
-
-  showStatus(
-    `🎉 Done. ${success} succeeded, ${failed} failed. Files have been moved.`,
-    success ? 'success' : 'error'
-  );
+  _producerActive = false;   // manual trigger: no producer running
+  startConsumer(apiKey, platform);
 }
-
 async function moveLocalFile(task, targetDirHandle) {
   if (!task.localHandle || !task.localName) {
     throw new Error('Missing local handle');
