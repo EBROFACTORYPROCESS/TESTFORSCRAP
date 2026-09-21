@@ -499,6 +499,36 @@ function getMaxSize() {
   if (!v || v < 200) return 1600;
   return v;
 }
+async function resizeImage(file) {
+  const maxDim = getMaxSize();
+  const { img, orientation } = await loadImageOriented(file);
+  let { width, height } = img;
+  const longest = Math.max(width, height);
+  let scale = 1;
+  if (longest > maxDim) scale = maxDim / longest;
+
+  const targetW = Math.round(width * scale);
+  const targetH = Math.round(height * scale);
+
+  const canvas = document.createElement('canvas');
+  canvas.width = targetW;
+  canvas.height = targetH;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, targetW, targetH);
+  ctx.drawImage(img, 0, 0, targetW, targetH);
+
+  const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.85));
+
+  return {
+    blob, width: targetW, height: targetH,
+    originalWidth: width, originalHeight: height,
+    originalSize: file.size,
+    resizedSize: blob ? blob.size : 0,
+    dataUrl: canvas.toDataURL('image/jpeg', 0.85),
+    orientation
+  };
+}
 /**
  * If the file is HEIC/HEIF, convert it to JPEG before processing.
  * Otherwise, return the file unchanged.
