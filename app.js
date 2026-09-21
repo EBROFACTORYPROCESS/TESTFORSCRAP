@@ -1413,15 +1413,26 @@ function computeQualityScore(tasks) {
     const flat = flattenJson(task.json || {});
     Object.keys(flat).forEach(path => {
       if (path === '_file' || path === '_taskId' || path === '_edited') return;
+
       const value = flat[path];
       const missing = isValueMissing(path, value);
+
+      // NEW: also treat format mismatches as "not present"
+      let formatBad = false;
+      if (!missing) {
+        const fStatus = checkFormat(path, value);
+        if (fStatus === 'format-mismatch') formatBad = true;
+      }
+
+      const isPresent = !missing && !formatBad;
       const isKey = keyPathSet.has(path);
+
       if (isKey) {
         keyTotal++;
-        if (!missing) keyPresent++;
+        if (isPresent) keyPresent++;
       } else {
         otherTotal++;
-        if (!missing) otherPresent++;
+        if (isPresent) otherPresent++;
       }
     });
   });
@@ -1672,7 +1683,11 @@ function renderResultTable(tasks) {
       const raw = r[h];
       let status = evaluateCell(raw);
       let hint = '';
-
+     
+      if (status === 'missing' && OPTIONAL_FIELDS.includes(h)) {
+        status = 'ok';
+      }
+      
       if (status === 'ok') {
         const fStatus = checkFormat(h, raw);
         if (fStatus === 'format-mismatch') {
