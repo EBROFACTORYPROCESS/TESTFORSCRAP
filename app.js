@@ -592,6 +592,7 @@ function showCompressProgress(current, total, fileName) {
   wrap.style.display = 'block';
   bar.style.width = `${pct}%`;
   label.textContent = `Compressing ${current} / ${total} (${pct}%) — ${fileName}`;
+  label.textContent = `${phase} ${current} / ${total} (${pct}%) — ${fileName}`;
 }
 
 function hideCompressProgress() {
@@ -599,6 +600,11 @@ function hideCompressProgress() {
   if (wrap) wrap.style.display = 'none';
 }
 async function addFiles(files) {
+  
+  const isHeic = /\.(heic|heif)$/i.test(originalFile.name);
+  const phase = isHeic ? '🔄 Converting HEIC' : '📦 Compressing';
+  showCompressProgress(current, total, originalFile.name, phase);
+  
   const imageFiles = Array.from(files).filter(f =>
     f.type.startsWith('image/') ||
     /\.(heic|heif)$/i.test(f.name)
