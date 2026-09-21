@@ -105,7 +105,7 @@ const FIELD_SCHEMA = {
     codigo_componente: { type: 'string', description: 'The handwritten value inside the box labeled "CÓDIGO COMPONENTE". Usually contains "/" separators, e.g. "Pilar B/Sup/Der".' },
     codigo_rechaz: { type: 'string', description: 'The handwritten value inside the small box labeled "CÓDIGO RECHAZ". Usually a short numeric code, e.g. "2216".' },
     cantidad: { type: 'string', description: 'A number handwritten INSIDE the box labeled "CANTIDAD". It is often followed by a horizontal PRINTED LINE (a guard line that prevents someone from adding extra digits later, e.g. converting "1" into "10" or "100"). Do NOT include this line or any trailing dashes in the value — only the digits. Examples: if you see "1" followed by a long line, return "1". If you see "2" followed by a line, return "2". The value is normally 1 to 3 digits.' },
-    origen_area_zona: { type: 'string', description: 'The handwritten location code on the LEFT-MIDDLE of the form. It is usually written inside a box labeled "ZONA O LÍNEA" (below "Detectado / Producido" and to the left of "Operación"). Typical values are short alphanumeric codes like "221R", "M1 52", "15A". If the ZONA O LÍNEA box is empty, check the adjacent "ORIGEN" box — the value can appear in either box. Return null if BOTH boxes are empty.'}
+    origen_area_zona: { type: 'string', description: 'A location code written in the LEFT-MIDDLE of the form. This field is composed of TWO adjacent sub-boxes under the header "ORIGEN": the LEFT sub-box is labeled "AREA" and the RIGHT sub-box is labeled "ZONA". Both sub-boxes usually contain a short code, e.g. AREA="M1" and ZONA="M3". Concatenate them into a single value WITHOUT a space or separator: "M1"+"M3" → "M1M3". If only one sub-box is filled, return only that value (e.g. "M1" or "M3"). If both are empty, also check the "ZONA O LÍNEA" box elsewhere on the form and use that value. Return null only if all three boxes are empty.' }
   },
   section_2: {
     motivo_rechace: { type: 'string', description:  'A rejection reason handwritten INSIDE the box labeled "MOTIVO RECHACE", in the LOWER-LEFT of the form. It is typically a short phrase describing the defect, e.g. "DESCASCARADA CON GOLPE DE CAJAS", "RAYADO", "GOLPE". It is NEVER a date, NEVER an operator ID, NEVER a 4-digit code. The text must be physically written INSIDE the MOTIVO RECHACE box — do NOT spread it to other fields.' },
@@ -151,6 +151,7 @@ const FORMAT_RULES = {
   'section_1.codigo_componente': { test: v => /[A-Za-z]/.test(v) && v.trim().length >= 4, hint: 'Expected a text description like "Pilar B/Sup/Der"' },
   'section_1.codigo_rechaz': { test: v => /^[0-9]{3,5}[A-Z]?$/i.test(v.trim()), hint: 'Expected a short numeric code like "2216"' },
   'section_1.cantidad': { test: v => /^[0-9]{1,3}$/.test(v.trim()), hint: 'Expected a small number like "2"' },
+  'section_1.origen_area_zona': { test: v => /^[A-Z0-9][A-Z0-9\s\-]{1,11}$/i.test(v.trim()), hint: 'Expected a short alphanumeric code like "M1M3" or "M1" or "15A".' },
   'section_2.motivo_rechace': { test: v => /^[0-9A-Z]{3,5}$/i.test(v.replace(/\s+/g, '')), hint: 'Expected a 3-5 character rejecting code' },
   'section_2.fecha': { test: v => /^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}$/.test(v.trim()), hint: 'Expected a date like "22/4/26"' },
   'section_2.operario': { test: v => /^[0-9]{3,4}$/.test(v.trim()), hint: 'Expected a 3 or 4 digit operator ID' },
@@ -205,6 +206,10 @@ function buildPromptText() {
   lines.push('   Do NOT guess or "spread" a value to fill empty fields.');
   lines.push('   If a box is EMPTY, return null for that field. An empty box is a valid answer.');
   lines.push('');
+  lines.push('4b. TWO-BOX FIELDS (exception to rule 4):');
+  lines.push('   The field "origen_area_zona" is built from TWO adjacent sub-boxes: "AREA" (left) and "ZONA" (right). This is the ONE allowed case where a single output field reads from two printed boxes. Concatenate both values into one string with NO separator.');
+  lines.push('   Example: AREA="M1", ZONA="M3" → origen_area_zona = "M1M3".');
+  lines.push('');
   lines.push('5. POSITIONAL ANCHORS (use these to locate each field):');
   lines.push('   - motivo_rechace:   LOWER-LEFT area, under the label "MOTIVO RECHACE"');
   lines.push('   - fecha:            BOTTOM-LEFT, small box with label "FECHA"');
@@ -212,7 +217,7 @@ function buildPromptText() {
   lines.push('   - observaciones:    BOTTOM-CENTER, wide box with label "OBSERVACIONES"');
   lines.push('   - cantidad:         MIDDLE-RIGHT, box labeled "CANTIDAD" (may have a guard line after the number)');
   lines.push('   - codigo_rechaz:    MIDDLE-LEFT, small box labeled "CÓDIGO RECHAZ"');
-  lines.push('   - origen_area_zona: LEFT-MIDDLE, box labeled "ZONA O LÍNEA" (below the Detectado/Producido row). If empty, check the "ORIGEN" box next to it.');
+  lines.push('   - origen_area_zona: LEFT-MIDDLE, composed of TWO sub-boxes under "ORIGEN": the LEFT one is "AREA" and the RIGHT one is "ZONA". Concatenate them (AREA + ZONA, no separator). Example: AREA="M1", ZONA="M3" → "M1M3". If empty, check the "ZONA O LÍNEA" box elsewhere.');
   lines.push('   These boxes are in DIFFERENT physical locations. A value written in one box cannot appear in another.');
   lines.push('');
   lines.push('6. Each field description below tells you exactly where its label is and what its value should look like.');
