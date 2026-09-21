@@ -511,34 +511,34 @@ function getMaxSize() {
  *
  * Uses the `heic2any` library (loaded via <script> in index.html).
  */
+/**
+ * If the file is HEIC/HEIF, convert it to JPEG before processing.
+ * Otherwise, return the file unchanged.
+ *
+ * Uses `heic-normalize` (loaded via ESM in index.html).
+ * Falls back gracefully if the library hasn't loaded yet.
+ */
 async function normalizeImageFormat(file) {
   try {
-    // Quick extension check
     const name = (file.name || '').toLowerCase();
     const looksLikeHeic = name.endsWith('.heic') || name.endsWith('.heif');
 
     if (!looksLikeHeic) return file;
 
+    // Check if the ESM module has loaded and exposed the function
+    if (typeof window.normalizeHeicFile !== 'function') {
+      console.warn('[HEIC] heic-normalize not loaded yet. Skipping conversion.');
+      return file;
+    }
+
     console.log(`[HEIC] Converting ${file.name} to JPEG...`);
 
-    // heic2any API: returns a Blob or an array of Blobs (for animated HEIC)
-    const result = await heic2any({
-      blob: file,
-      toType: 'image/jpeg',
-      quality: 0.92
-    });
-
-    // heic2any may return an array for multi-frame images; take the first frame
-    const convertedBlob = Array.isArray(result) ? result[0] : result;
-
-    const newName = file.name.replace(/\.(heic|heif)$/i, '.jpg');
-    const convertedFile = new File([convertedBlob], newName, {
-      type: 'image/jpeg',
-      lastModified: file.lastModified || Date.now()
-    });
+    // heic-normalize API: normalizeHeicFile(file, target?)
+    // Default target is 'image/jpeg'
+    const convertedFile = await window.normalizeHeicFile(file);
 
     console.log(
-      `[HEIC] Converted ${file.name} → ${newName} ` +
+      `[HEIC] Converted ${file.name} → ${convertedFile.name} ` +
       `(${Math.round(convertedFile.size / 1024)} KB)`
     );
 
@@ -548,37 +548,6 @@ async function normalizeImageFormat(file) {
     console.warn(`[HEIC] Conversion failed for ${file.name}:`, err);
     return file;
   }
-}
-
-async function resizeImage(file) {
-  const maxDim = getMaxSize();
-  const { img, orientation } = await loadImageOriented(file);
-  let { width, height } = img;
-  const longest = Math.max(width, height);
-  let scale = 1;
-  if (longest > maxDim) scale = maxDim / longest;
-
-  const targetW = Math.round(width * scale);
-  const targetH = Math.round(height * scale);
-
-  const canvas = document.createElement('canvas');
-  canvas.width = targetW;
-  canvas.height = targetH;
-  const ctx = canvas.getContext('2d');
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, targetW, targetH);
-  ctx.drawImage(img, 0, 0, targetW, targetH);
-
-  const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.85));
-
-  return {
-    blob, width: targetW, height: targetH,
-    originalWidth: width, originalHeight: height,
-    originalSize: file.size,
-    resizedSize: blob ? blob.size : 0,
-    dataUrl: canvas.toDataURL('image/jpeg', 0.85),
-    orientation
-  };
 }
 
 async function addFiles(files) {
