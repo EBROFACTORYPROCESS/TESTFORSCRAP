@@ -499,6 +499,57 @@ function getMaxSize() {
   if (!v || v < 200) return 1600;
   return v;
 }
+/**
+ * If the file is HEIC/HEIF, convert it to JPEG before processing.
+ * Otherwise, return the file unchanged.
+ *
+ * Uses the `heicraft` library (loaded via CDN in index.html).
+ */
+async function normalizeImageFormat(file) {
+  try {
+    // Quick extension check (cheap, avoids loading the WASM decoder unnecessarily)
+    const name = (file.name || '').toLowerCase();
+    const looksLikeHeic = name.endsWith('.heic') || name.endsWith('.heif');
+
+    // Content-based check (catches HEIC files renamed to .jpg)
+    let isHeic = looksLikeHeic;
+    if (!isHeic && typeof heicraft !== 'undefined' && heicraft.isHeic) {
+      try {
+        isHeic = await heicraft.isHeic(file);
+      } catch (e) {
+        // Ignore detection errors and assume not HEIC
+      }
+    }
+
+    if (!isHeic) return file;
+
+    console.log(`[HEIC] Converting ${file.name} to JPEG...`);
+
+    const result = await heicraft.convertHeic(file, {
+      format: 'jpeg',
+      quality: 0.92
+    });
+
+    // Build a new File from the converted Blob
+    const newName = file.name.replace(/\.(heic|heif)$/i, '.jpg');
+    const convertedFile = new File([result.data], newName, {
+      type: 'image/jpeg',
+      lastModified: file.lastModified || Date.now()
+    });
+
+    console.log(
+      `[HEIC] Converted ${file.name} → ${newName} ` +
+      `(${Math.round(convertedFile.size / 1024)} KB)`
+    );
+
+    return convertedFile;
+
+  } catch (err) {
+    console.warn(`[HEIC] Conversion failed for ${file.name}:`, err);
+    // Fall back to the original file so the user sees the downstream error
+    return file;
+  }
+}
 
 async function resizeImage(file) {
   const maxDim = getMaxSize();
@@ -532,14 +583,26 @@ async function resizeImage(file) {
 }
 
 async function addFiles(files) {
-  const imageFiles = Array.from(files).filter(f => f.type.startsWith('image/'));
+  const imageFiles = Array.from(files).filter(f =>
+    f.type.startsWith('image/') ||
+    /\.(heic|heif)$/i.test(f.name)
+  );
   if (!imageFiles.length) {
     showStatus('Please select image files.', 'error');
     return;
   }
-  showStatus(`Resizing ${imageFiles.length} image(s)...`, 'loading');
+    const heicCount = imageFiles.filter(f =>
+    /\.(heic|heif)$/i.test(f.name)
+  ).length;
 
-  for (const file of imageFiles) {
+  const msg = heicCount > 0
+    ? `Converting ${heicCount} HEIC file(s) and resizing ${imageFiles.length} image(s)...`
+    : `Resizing ${imageFiles.length} image(s)...`;
+
+  showStatus(msg, 'loading');
+
+  for (const originalFile of imageFiles) {
+    const file = await normalizeImageFormat(originalFile);
     const task = {
       id: ++idCounter, file, previewUrl: null,
       status: 'waiting', json: null, originalJson: null, edited: false, error: null,
@@ -2324,7 +2387,7 @@ async function loadLocalFiles() {
     localStatus.textContent = 'Reading folder...';
     localStatus.className = 'local-status';
 
-    const imageExts = ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.tif', '.tiff'];
+    const imageExts = ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif', '.tif', '.tiff', '.heic', '.heif'];
     const files = [];
 
     for await (const [name, handle] of localHandles.input.entries()) {
@@ -2345,11 +2408,12 @@ async function loadLocalFiles() {
     idCounter = 0;
 
     localStatus.textContent = `Compressing ${files.length} file(s)...`;
-
     for (const f of files) {
+      // Convert HEIC/HEIF to JPEG if needed
+      const normalizedFile = await normalizeImageFormat(f.file);
       const task = {
         id: ++idCounter,
-        file: f.file,
+        file: normalizedFile,
         previewUrl: null,
         status: 'waiting',
         json: null,
@@ -2364,7 +2428,7 @@ async function loadLocalFiles() {
       };
 
       try {
-        const resized = await resizeImage(f.file);
+        const resized = await resizeImage(normalizedFile);
         task.resizedBlob = resized.blob;
         task.resizedDataUrl = resized.dataUrl;
         task.resizeInfo = {
@@ -2376,7 +2440,7 @@ async function loadLocalFiles() {
         task.previewUrl = resized.dataUrl;
       } catch (err) {
         console.error('Resize failed:', f.name, err);
-        task.previewUrl = await fileToDataUrl(f.file);
+        task.previewUrl = await fileToDataUrl(normalizedFile);
         task.resizeInfo = { error: 'Resize failed, using original' };
       }
 
