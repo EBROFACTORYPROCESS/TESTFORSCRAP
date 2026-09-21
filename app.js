@@ -579,7 +579,25 @@ async function normalizeImageFormat(file) {
     return file;
   }
 }
+// ============================================================
+//  Compression progress indicator
+// ============================================================
+function showCompressProgress(current, total, fileName) {
+  const wrap = document.getElementById('compressProgressWrap');
+  const label = document.getElementById('compressProgressLabel');
+  const bar = document.getElementById('compressProgressBar');
+  if (!wrap || !label || !bar) return;
 
+  const pct = total > 0 ? Math.round((current / total) * 100) : 0;
+  wrap.style.display = 'block';
+  bar.style.width = `${pct}%`;
+  label.textContent = `Compressing ${current} / ${total} (${pct}%) — ${fileName}`;
+}
+
+function hideCompressProgress() {
+  const wrap = document.getElementById('compressProgressWrap');
+  if (wrap) wrap.style.display = 'none';
+}
 async function addFiles(files) {
   const imageFiles = Array.from(files).filter(f =>
     f.type.startsWith('image/') ||
@@ -599,7 +617,13 @@ async function addFiles(files) {
 
   showStatus(msg, 'loading');
 
+  const total = imageFiles.length;
+  let current = 0;
+
   for (const originalFile of imageFiles) {
+    current++;
+    showCompressProgress(current, total, originalFile.name);
+
     const file = await normalizeImageFormat(originalFile);
     const task = {
       id: ++idCounter, file, previewUrl: null,
@@ -624,6 +648,8 @@ async function addFiles(files) {
     }
     queue.push(task);
   }
+
+  hideCompressProgress();
 
   renderQueue();
   updateButtonState();
@@ -2404,9 +2430,13 @@ async function loadLocalFiles() {
 
     queue = [];
     idCounter = 0;
-
-    localStatus.textContent = `Compressing ${files.length} file(s)...`;
+    
+    const total = files.length;
+    let current = 0;
+    
     for (const f of files) {
+      current++;
+      showCompressProgress(current, total, f.name);
       // Convert HEIC/HEIF to JPEG if needed
       const normalizedFile = await normalizeImageFormat(f.file);
       const task = {
@@ -2444,7 +2474,7 @@ async function loadLocalFiles() {
 
       queue.push(task);
     }
-
+    hideCompressProgress();
     renderQueue();
     updateButtonState();
     updateLocalModeButtons();
