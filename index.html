@@ -106,8 +106,15 @@
             <button class="btn" id="localLoadBtn" disabled>📥 Load Images</button>
             <button class="btn btn-excel" id="localProcessBtn" disabled>🚀 Process &amp; Move</button>
           </div>
+          <label style="display:flex; align-items:center; gap:8px; margin-top:10px; font-size:13px; color:#555;">
+            <input type="checkbox" id="autoProcessToggleLocal" checked>
+            🚀 Auto-process as files are added
+          </label>
         </div>
-
+        <label style="display:flex; align-items:center; gap:8px; margin-top:10px; font-size:13px; color:#555;">
+          <input type="checkbox" id="autoProcessToggle" checked>
+          🚀 Auto-process as files are added (recommended for large batches)
+        </label>
         <!-- Upload Panel -->
         <div class="input-method-panel" data-method="upload" id="uploadPanel">
           <div class="upload-area" id="uploadArea">
