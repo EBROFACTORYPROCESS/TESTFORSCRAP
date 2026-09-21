@@ -1057,3 +1057,29 @@ td.cell-category-supplier {
   background: #e3f2fd;
   border-color: #4a90e2;
 }
+/* ---------- Compression Progress ---------- */
+.compress-progress-wrap {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: #f0f7ff;
+  border: 1px solid #b8d4f1;
+  border-radius: 8px;
+}
+.compress-progress-label {
+  font-size: 12px;
+  color: #084298;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.compress-progress-bar-bg {
+  height: 8px;
+  background: #e9ecef;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.compress-progress-bar {
+  height: 100%;
+  width: 0%;
+  background: #4a90e2;
+  transition: width 0.2s ease-out;
+}
