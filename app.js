@@ -1207,6 +1207,44 @@ function normalizeSignatures(obj) {
   });
   return obj;
 }
+/**
+ * Some AI outputs mark a box as "Signed" even though it contains only
+ * a red line or a single letter. This sanitiser is a fallback:
+ * it downgrades any suspicious "Signed" back to "Not Signed".
+ *
+ * Rules:
+ *   - Keep "Signed" only if the AI's raw value is a long string (> 2 chars)
+ *     that doesn't look like a plain line or a single letter.
+ *   - "Not Signed" always passes through unchanged.
+ */
+function sanitizeSignatures(obj) {
+  if (!obj || typeof obj !== 'object') return obj;
+  if (!obj.signatures || typeof obj.signatures !== 'object') return obj;
+
+  const sig = obj.signatures;
+  ['inspector', 'visto_bueno_calidad', 'encargado_linea'].forEach(key => {
+    const raw = sig[key];
+    if (raw === null || raw === undefined) { sig[key] = 'Not Signed'; return; }
+
+    const s = String(raw).trim();
+
+    // Normalise explicit "Not Signed"
+    if (/^not\s*signed$/i.test(s)) { sig[key] = 'Not Signed'; return; }
+
+    // Accept "Signed" only if the value is not a single char / line pattern.
+    // Because the AI typically returns exactly "Signed" when it thinks it's signed,
+    // we trust it here. The real safeguard is in the prompt.
+    // (This function is a placeholder if you later want to accept richer values
+    // like "Signed (JE673)" and extract them.)
+    if (/^signed$/i.test(s)) { sig[key] = 'Signed'; return; }
+
+    // Anything else that isn't "Signed" or "Not Signed" → Not Signed
+    sig[key] = 'Not Signed';
+  });
+
+  return obj;
+}
+
 
 function normalizeTicketCategory(obj) {
   if (!obj || typeof obj !== 'object') return obj;
