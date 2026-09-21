@@ -1089,6 +1089,7 @@ function stripFences(text) {
 
 function postProcess(parsed) {
   parsed = unwrapSchemaEcho(parsed);
+  parsed = coerceNullStrings(parsed);       
   parsed = normalizeSignatures(parsed);
   parsed = sanitizeSignatures(parsed); 
   parsed = normalizeTicketCategory(parsed);
@@ -2597,4 +2598,23 @@ function validateCantidad(value) {
     return `Quantity is ${n} — usually should be 1. Please verify.`;
   }
   return null;
+}
+/**
+ * Some AI outputs return the literal string "null" instead of a real JSON null.
+ * This function walks the object and converts these to actual nulls.
+ */
+function coerceNullStrings(obj) {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj === 'string') {
+    if (/^null$/i.test(obj.trim())) return null;
+    return obj;
+  }
+  if (typeof obj !== 'object') return obj;
+  if (Array.isArray(obj)) return obj.map(coerceNullStrings);
+
+  const out = {};
+  for (const key of Object.keys(obj)) {
+    out[key] = coerceNullStrings(obj[key]);
+  }
+  return out;
 }
