@@ -176,14 +176,27 @@
     </main>
 
   </div>
-
+  <!-- Correction Library Panel (collapsible) -->
+  <div class="card" id="correctionPanel" style="display: none;">
+    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+      <h2 style="font-size: 16px;">📚 Correction Library</h2>
+      <button class="btn btn-clear" id="clearCorrectionsBtn" style="width: auto; margin: 0; padding: 6px 12px; font-size: 12px;">🗑️ Clear All</button>
+    </div>
+    <p class="hint" style="margin-bottom: 10px;">
+      Corrections seen <b>2 or more times</b> are applied automatically to future extractions.
+    </p>
+    <div id="correctionList"></div>
+  </div>
   <!-- ============================================================
        EXTRACTION RESULTS — Full width, below the two columns
        ============================================================ -->
   <div class="card result-section" id="resultSection">
-    <div class="result-header">
+   <div class="result-header">
       <h2>✅ Extraction Results</h2>
-      <p class="hint" style="margin: 0;">Click <b>Edit</b> on any row to correct before downloading.</p>
+      <div style="display: flex; gap: 10px; align-items: center;">
+        <button class="btn" id="toggleCorrectionsBtn" style="width: auto; margin: 0; padding: 6px 14px; font-size: 12px; background: #6c757d;">📚 View Corrections</button>
+        <p class="hint" style="margin: 0;">Click <b>Edit</b> on any row to correct before downloading.</p>
+      </div>
     </div>
 
     <div class="issues-banner" id="issuesBanner"></div>
