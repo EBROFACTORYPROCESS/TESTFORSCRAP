@@ -891,6 +891,27 @@ async function startConsumer(apiKey, platform) {
       task.status = 'error';
     }
 
+    // ──────────────────────────────────────────────────────────
+    //  Move the file to readed/ or error/ (Local Folder mode only)
+    // ──────────────────────────────────────────────────────────
+    if (inputMethod === 'folder' && task.localHandle && task.localName) {
+      try {
+        const targetHandle = task.status === 'success'
+          ? localHandles.readed
+          : localHandles.error;
+        const movedName = await moveLocalFile(task, targetHandle);
+        task.movedTo = movedName;
+        task.currentLocation = task.status === 'success' ? 'readed' : 'error';
+        console.log(`[move] ${task.localName} → ${task.currentLocation}/${movedName}`);
+      } catch (moveErr) {
+        console.error('Move failed:', task.localName, moveErr);
+        task.error = (task.error ? task.error + ' | ' : '') + 'Move failed: ' + moveErr.message;
+      }
+    }
+
+    // Live update queue
+    renderQueueThrottled();
+
     // Live update queue
     renderQueueThrottled();
 
