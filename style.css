@@ -36,17 +36,18 @@ h1 { font-size: 22px; margin-bottom: 4px; }
   display: flex;
   flex-direction: column;
   flex: 1;
-  min-height: 0;           /* allows children to shrink inside a flex parent */
+  min-height: 0;
   margin-bottom: 0;
+  overflow: hidden;        /* clip overflow so the inner scroller takes over */
 }
 
 /* Scrollable wrapper for the queue */
 .queue-scroll {
   flex: 1;
   overflow-y: auto;
-  min-height: 0;           /* critical: lets overflow work inside flex */
+  min-height: 0;
   margin-top: 12px;
-  padding-right: 4px;      /* small gap so the scrollbar doesn't overlap rows */
+  padding-right: 6px;
 }
 
 /* Optional: subtle scrollbar styling */
@@ -69,6 +70,9 @@ h1 { font-size: 22px; margin-bottom: 4px; }
   gap: 20px;
   align-items: stretch;
   margin-bottom: 20px;
+  /* KEY: limit the layout height to what's left after the header */
+  height: calc(100vh - 140px);
+  min-height: 400px;   /* never collapse below this if the window is tiny */
 }
 
 .col-config {
@@ -76,7 +80,9 @@ h1 { font-size: 22px; margin-bottom: 4px; }
   flex-direction: column;
   gap: 20px;
   min-width: 0;
-  height: 100%;   
+  height: 100%;
+  overflow-y: auto;        /* allow the config column to scroll if it's too tall */
+  padding-right: 4px;
 }
 
 .col-content {
@@ -84,7 +90,7 @@ h1 { font-size: 22px; margin-bottom: 4px; }
   flex-direction: column;
   gap: 20px;
   min-width: 0;
-  height: 100%;  
+  height: 100%;
 }
 
 .col-config .card,
@@ -381,7 +387,9 @@ h1 { font-size: 22px; margin-bottom: 4px; }
 /* ============================================================
    Queue list
    ============================================================ */
-.queue-list { margin-top: 14px; }
+.queue-list {
+  margin-top: 0;          /* the wrapper already handles spacing */
+}
 .queue-item {
   display: flex;
   align-items: center;
