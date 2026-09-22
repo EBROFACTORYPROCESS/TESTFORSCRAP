@@ -292,7 +292,7 @@ function updatePlatformUI() {
   apiKeyBadge.textContent = cfg.name;
   apiKeyBadge.className = `platform-badge ${cfg.badgeClass}`;
   apiKeyInput.placeholder = cfg.placeholder;
-  apiKeyHint.textContent = cfg.keyHint;
+  apiKeyHint.innerHTML = cfg.keyHint;
   platformHint.textContent = `Model: ${platform === 'gemini' ? getCurrentGeminiModel() : cfg.defaultModel}`;
 
   balancePanel.style.display = (platform === 'deepseek') ? 'block' : 'none';
