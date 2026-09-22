@@ -1146,3 +1146,12 @@ td.cell-category-supplier {
   background: #4a90e2;
   transition: width 0.2s ease-out;
 }
+.hint a {
+  color: #4a90e2;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.hint a:hover {
+  color: #357abd;
+  text-decoration: none;
+}
