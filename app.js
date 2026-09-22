@@ -1444,17 +1444,16 @@ async function callGemini({ base64, mimeType, prompt, apiKey }) {
     e.transient = true;
     throw e;
   }
-    // In callGemini(), before "return postProcess(parsed);"
-  parsed = postProcess(parsed);
 
-  // Detect invalid image and throw a specific error
+  // ──────────────────────────────────────────────────────────
+  //  Check validity BEFORE postProcess strips _validity
+  // ──────────────────────────────────────────────────────────
   if (parsed.header && parsed.header._validity === 'invalid') {
     const e = new Error('INVALID_IMAGE');
     e.invalidImage = true;
     throw e;
   }
 
-  return parsed;
   return postProcess(parsed);
 }
 
@@ -1523,17 +1522,16 @@ async function callDeepSeek({ base64, mimeType, prompt, apiKey }) {
     e.transient = true;
     throw e;
   }
-  // In callDeepseek(), before "return postProcess(parsed);"
-  parsed = postProcess(parsed);
 
-  // Detect invalid image and throw a specific error
+  // ──────────────────────────────────────────────────────────
+  //  Check validity BEFORE postProcess strips _validity
+  // ──────────────────────────────────────────────────────────
   if (parsed.header && parsed.header._validity === 'invalid') {
     const e = new Error('INVALID_IMAGE');
     e.invalidImage = true;
     throw e;
   }
 
-  return parsed;
   return postProcess(parsed);
 }
 
@@ -1553,7 +1551,11 @@ function postProcess(parsed) {
   parsed = dedupeFields(parsed);
   parsed = flagSuspiciousSignatures(parsed);
   parsed = removeHiddenFields(parsed);
-  parsed = applyLearnedCorrections(parsed);   // ← NEW
+  parsed = applyLearnedCorrections(parsed);
+  // Now strip _validity — it has already been checked upstream
+  if (parsed.header && typeof parsed.header === 'object') {
+    delete parsed.header._validity;
+  }
   return parsed;
 }
 /**
@@ -1744,7 +1746,9 @@ function removeHiddenFields(obj) {
   if (obj.header && typeof obj.header === 'object') {
     delete obj.header.company;
     delete obj.header.document_type;
-    delete obj.header._validity;   // ← NEW
+    // Note: we do NOT delete _validity here anymore.
+    // It is checked in callGemini/callDeepSeek BEFORE postProcess runs,
+    // and then postProcess removes it via the field filter below.
   }
   return obj;
 }
