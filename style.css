@@ -31,6 +31,35 @@ h1 { font-size: 22px; margin-bottom: 4px; }
   border-bottom: 1px solid #eee;
 }
 
+/* Queue card fills the right column and scrolls internally */
+#sharedQueueCard {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;           /* allows children to shrink inside a flex parent */
+  margin-bottom: 0;
+}
+
+/* Scrollable wrapper for the queue */
+.queue-scroll {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;           /* critical: lets overflow work inside flex */
+  margin-top: 12px;
+  padding-right: 4px;      /* small gap so the scrollbar doesn't overlap rows */
+}
+
+/* Optional: subtle scrollbar styling */
+.queue-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.queue-scroll::-webkit-scrollbar-thumb {
+  background: #c8c8c8;
+  border-radius: 4px;
+}
+.queue-scroll::-webkit-scrollbar-thumb:hover {
+  background: #a0a0a0;
+}
 /* ============================================================
    Two-column layout
    ============================================================ */
@@ -38,7 +67,7 @@ h1 { font-size: 22px; margin-bottom: 4px; }
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 20px;
-  align-items: start;
+  align-items: stretch;
   margin-bottom: 20px;
 }
 
@@ -47,6 +76,7 @@ h1 { font-size: 22px; margin-bottom: 4px; }
   flex-direction: column;
   gap: 20px;
   min-width: 0;
+  height: 100%;   
 }
 
 .col-content {
@@ -54,6 +84,7 @@ h1 { font-size: 22px; margin-bottom: 4px; }
   flex-direction: column;
   gap: 20px;
   min-width: 0;
+  height: 100%;  
 }
 
 .col-config .card,
