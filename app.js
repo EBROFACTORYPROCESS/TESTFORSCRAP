@@ -925,11 +925,18 @@ async function startConsumer(apiKey, platform) {
     try {
       await rateLimiter.wait();
       const json = await extractOneWithRetry(task, apiKey, platform);
-      task.json = json;
-      if (json && json._signatureWarning) {
+
+      // Extract metadata before storing the clean JSON
+      if (json._signatureWarning) {
         task.signatureWarning = json._signatureWarning;
         delete json._signatureWarning;
       }
+      if (json._autoCorrections) {
+        task.autoCorrections = json._autoCorrections;
+        delete json._autoCorrections;
+      }
+
+      task.json = json;
       task.originalJson = JSON.parse(JSON.stringify(json));
       task.status = 'success';
       task.error = null;
@@ -1084,11 +1091,18 @@ async function runBatch(tasks, apiKey) {
     try {
       await rateLimiter.wait();
       const json = await extractOneWithRetry(task, apiKey, platform);
-      task.json = json;
+
+      // Extract metadata before storing the clean JSON
       if (json._signatureWarning) {
         task.signatureWarning = json._signatureWarning;
         delete json._signatureWarning;
       }
+      if (json._autoCorrections) {
+        task.autoCorrections = json._autoCorrections;
+        delete json._autoCorrections;
+      }
+
+      task.json = json;
       task.originalJson = JSON.parse(JSON.stringify(json));
       task.status = 'success';
       task.error = null;
@@ -1197,20 +1211,22 @@ async function retryOne(id) {
   try {
     await rateLimiter.wait();
     const json = await extractOneWithRetry(task, apiKey, platform);
-    task.json = json;
-    if (json && json._signatureWarning) {
+
+    // Extract metadata before storing the clean JSON
+    if (json._signatureWarning) {
       task.signatureWarning = json._signatureWarning;
-      delete json._signatureWarning;
-    }
+      delete json._signatureWarning;      }
+    if (json._autoCorrections) {
+      task.autoCorrections = json._autoCorrections;
+      delete json._autoCorrections;      }
+    task.json = json;
     task.originalJson = JSON.parse(JSON.stringify(json));
-    task.edited = false;
-    task.status = 'success';
-    task.error = null;
+    task.status = 'success';      task.error = null;
   } catch (err) {
-    console.error(err);
-    task.error = err.message || 'Unknown error';
-    task.status = 'error';
-  }
+  console.error(err);
+  task.error = err.message || 'Unknown error';
+  task.status = 'error';
+}
 
   // Move file based on new outcome
   if (inputMethod === 'folder' && task.localHandle && task.localName) {
@@ -1484,13 +1500,14 @@ function stripFences(text) {
 
 function postProcess(parsed) {
   parsed = unwrapSchemaEcho(parsed);
-  parsed = coerceNullStrings(parsed);       
+  parsed = coerceNullStrings(parsed);
   parsed = normalizeSignatures(parsed);
-  parsed = sanitizeSignatures(parsed); 
+  parsed = sanitizeSignatures(parsed);
   parsed = normalizeTicketCategory(parsed);
   parsed = dedupeFields(parsed);
   parsed = flagSuspiciousSignatures(parsed);
   parsed = removeHiddenFields(parsed);
+  parsed = applyLearnedCorrections(parsed);   // ← NEW
   return parsed;
 }
 /**
@@ -2491,6 +2508,13 @@ function onModalSave() {
   task.json = editingDraft;
   task.edited = orig !== curr;
 
+  // ──────────────────────────────────────────────────────────
+  //  Record corrections to the library (only if user actually edited)
+  // ──────────────────────────────────────────────────────────
+  if (task.edited) {
+    recordCorrectionsFromEdit(task.originalJson, editingDraft);
+  }
+
   closeEditModal();
   renderQueue();
 
@@ -3071,3 +3095,171 @@ function coerceNullStrings(obj) {
   }
   return out;
 }
+// ============================================================
+//  Correction Library — learns from user edits
+//  Stores (path, aiValue, userValue) triplets in localStorage.
+//  After enough confirmations, corrections are applied automatically.
+// ============================================================
+
+const CORRECTION_LIBRARY_KEY = 'correction_library';
+const CORRECTION_MIN_COUNT = 2;   // apply only after seeing the same correction N times
+
+// ------------------------------------------------------------
+//  Storage helpers
+// ------------------------------------------------------------
+function loadCorrectionLibrary() {
+  try {
+    const raw = localStorage.getItem(CORRECTION_LIBRARY_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    console.warn('[correction] Failed to load library:', e);
+    return [];
+  }
+}
+
+function saveCorrectionLibrary(lib) {
+  try {
+    localStorage.setItem(CORRECTION_LIBRARY_KEY, JSON.stringify(lib));
+  } catch (e) {
+    console.warn('[correction] Failed to save library:', e);
+  }
+}
+
+// ------------------------------------------------------------
+//  Record a single correction
+// ------------------------------------------------------------
+function recordCorrection(path, aiValue, userValue) {
+  // Normalize
+  const aiNorm   = aiValue   === null || aiValue   === undefined ? null : String(aiValue).trim();
+  const userNorm = userValue === null || userValue === undefined ? null : String(userValue).trim();
+
+  // Nothing changed — skip
+  if (aiNorm === userNorm) return;
+
+  const lib = loadCorrectionLibrary();
+
+  const existing = lib.find(r =>
+    r.path === path &&
+    r.aiValue === aiNorm &&
+    r.userValue === userNorm
+  );
+
+  if (existing) {
+    existing.count += 1;
+    existing.lastSeen = new Date().toISOString();
+    console.log(`[correction] updated: ${path} "${aiNorm}" → "${userNorm}" (count: ${existing.count})`);
+  } else {
+    lib.push({
+      path,
+      aiValue: aiNorm,
+      userValue: userNorm,
+      count: 1,
+      lastSeen: new Date().toISOString()
+    });
+    console.log(`[correction] recorded: ${path} "${aiNorm}" → "${userNorm}" (count: 1)`);
+  }
+
+  saveCorrectionLibrary(lib);
+}
+
+// ------------------------------------------------------------
+//  Diff two JSON objects and record every field that changed
+// ------------------------------------------------------------
+function recordCorrectionsFromEdit(originalJson, currentJson) {
+  const origFlat = flattenJson(originalJson || {});
+  const currFlat = flattenJson(currentJson || {});
+
+  const allPaths = new Set([...Object.keys(origFlat), ...Object.keys(currFlat)]);
+
+  allPaths.forEach(path => {
+    // Skip internal markers
+    if (path.startsWith('_')) return;
+
+    const origVal = origFlat[path];
+    const currVal = currFlat[path];
+
+    // Normalize empty/null to null for comparison
+    const origStr = origVal === null || origVal === undefined || String(origVal).trim() === ''
+      ? null
+      : String(origVal).trim();
+    const currStr = currVal === null || currVal === undefined || String(currVal).trim() === ''
+      ? null
+      : String(currVal).trim();
+
+    if (origStr !== currStr) {
+      recordCorrection(path, origStr, currStr);
+    }
+  });
+}
+
+// ------------------------------------------------------------
+//  Apply learned corrections to fresh AI output
+// ------------------------------------------------------------
+function applyLearnedCorrections(parsed) {
+  if (!parsed || typeof parsed !== 'object') return parsed;
+
+  const lib = loadCorrectionLibrary();
+  if (!lib.length) return parsed;
+
+  let appliedCount = 0;
+  const appliedLog = [];
+
+  lib.forEach(record => {
+    if (record.count < CORRECTION_MIN_COUNT) return;   // not confident enough yet
+
+    const [section, field] = record.path.split('.');
+    if (!section || !field) return;
+    if (!parsed[section] || typeof parsed[section] !== 'object') return;
+
+    const currentValue = parsed[section][field];
+    const currentNorm = currentValue === null || currentValue === undefined
+      ? null
+      : String(currentValue).trim();
+
+    // Apply only if the AI's value exactly matches the recorded mistake
+    if (currentNorm === record.aiValue) {
+      parsed[section][field] = record.userValue;
+      appliedCount++;
+      appliedLog.push(`${record.path}: "${record.aiValue}" → "${record.userValue}" (learned ${record.count}x)`);
+    }
+  });
+
+  if (appliedCount > 0) {
+    console.log(`[correction] ${appliedCount} correction(s) applied automatically:`);
+    appliedLog.forEach(l => console.log('  ·', l));
+
+    // Attach metadata so the UI can flag auto-corrected rows
+    if (!parsed._autoCorrections) parsed._autoCorrections = [];
+    parsed._autoCorrections.push(...appliedLog);
+  }
+
+  return parsed;
+}
+
+// ------------------------------------------------------------
+//  Debug helpers (paste in console to inspect / reset)
+// ------------------------------------------------------------
+function showCorrectionLibrary() {
+  const lib = loadCorrectionLibrary();
+  if (!lib.length) {
+    console.log('[correction] Library is empty');
+    return;
+  }
+  console.table(lib.map(r => ({
+    path: r.path,
+    aiValue: r.aiValue,
+    userValue: r.userValue,
+    count: r.count,
+    active: r.count >= CORRECTION_MIN_COUNT ? 'YES' : 'no',
+    lastSeen: r.lastSeen
+  })));
+}
+
+function clearCorrectionLibrary() {
+  localStorage.removeItem(CORRECTION_LIBRARY_KEY);
+  console.log('[correction] Library cleared');
+}
+
+// Expose to window so you can call them from the Console
+window.showCorrectionLibrary = showCorrectionLibrary;
+window.clearCorrectionLibrary = clearCorrectionLibrary;
