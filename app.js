@@ -3262,6 +3262,31 @@ function clearCorrectionLibrary() {
   localStorage.removeItem(CORRECTION_LIBRARY_KEY);
   console.log('[correction] Library cleared');
 }
+/**
+ * Delete a single correction from the library.
+ * Matches by path + aiValue + userValue (all three must be equal).
+ */
+function deleteCorrection(path, aiValue, userValue) {
+  const lib = loadCorrectionLibrary();
+
+  const before = lib.length;
+  const filtered = lib.filter(r =>
+    !(r.path === path && r.aiValue === aiValue && r.userValue === userValue)
+  );
+  const after = filtered.length;
+
+  if (after < before) {
+    saveCorrectionLibrary(filtered);
+    console.log(`[correction] deleted: ${path} "${aiValue}" → "${userValue}"`);
+    return true;
+  } else {
+    console.warn(`[correction] not found: ${path} "${aiValue}" → "${userValue}"`);
+    return false;
+  }
+}
+
+// Expose to Console
+window.deleteCorrection = deleteCorrection;
 // ------------------------------------------------------------
 //  Correction Library UI
 // ------------------------------------------------------------
@@ -3277,11 +3302,16 @@ function renderCorrectionLibrary() {
 
   const sorted = [...lib].sort((a, b) => b.count - a.count);
 
-  const html = sorted.map(r => {
+  const html = sorted.map((r, index) => {
     const active = r.count >= CORRECTION_MIN_COUNT;
     const badge = active
       ? '<span style="background:#d1e7dd;color:#0f5132;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">ACTIVE</span>'
       : '<span style="background:#fff3cd;color:#664d03;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">pending</span>';
+
+    // Escape values for safe HTML attributes
+    const pathAttr = escapeHtml(r.path);
+    const aiAttr   = escapeHtml(r.aiValue ?? '');
+    const userAttr = escapeHtml(r.userValue ?? '');
 
     return `
       <div style="display:flex; align-items:center; gap:12px; padding:8px 10px; border:1px solid #eee; border-radius:6px; margin-bottom:6px; font-size:12px;">
@@ -3291,13 +3321,34 @@ function renderCorrectionLibrary() {
         <span style="color:#0f5132; font-weight:600;">"${escapeHtml(r.userValue ?? 'null')}"</span>
         <span style="margin-left:auto; color:#666;">×${r.count}</span>
         ${badge}
+        <button class="correction-delete-btn"
+                data-path="${pathAttr}"
+                data-ai="${aiAttr}"
+                data-user="${userAttr}"
+                title="Delete this correction"
+                style="background:#dc3545; color:#fff; border:none; border-radius:4px; padding:3px 8px; font-size:11px; cursor:pointer;">
+          ✕
+        </button>
       </div>
     `;
   }).join('');
 
   list.innerHTML = html;
-}
 
+  // Attach delete handlers
+  list.querySelectorAll('.correction-delete-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const path = btn.dataset.path;
+      const ai = btn.dataset.ai || null;
+      const user = btn.dataset.user || null;
+
+      if (!confirm(`Delete this correction?\n\n${path}\n"${ai}" → "${user}"`)) return;
+
+      deleteCorrection(path, ai, user);
+      renderCorrectionLibrary();   // re-render the list
+    });
+  });
+}
 // Wire up the toggle + clear buttons
 document.addEventListener('DOMContentLoaded', () => {
   const toggleBtn = document.getElementById('toggleCorrectionsBtn');
