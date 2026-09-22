@@ -63,6 +63,7 @@ const modalCancelBtn = document.getElementById('modalCancelBtn');
 const modalSaveBtn = document.getElementById('modalSaveBtn');
 const modalResetBtn = document.getElementById('modalResetBtn');
 const imageScroll = document.getElementById('imageScroll');
+const imageRotator = document.getElementById('imageRotator');
 const zoomLabel = document.getElementById('zoomLabel');
 const zoomInBtn = document.getElementById('zoomInBtn');
 const zoomOutBtn = document.getElementById('zoomOutBtn');
@@ -2188,26 +2189,25 @@ function getDisplayHeader(path) {
 }
 
 // ============================================================
-//  Zoom
+//  Zoom — width-based scaling so the container scrolls properly
 // ============================================================
 function applyZoom() {
   const s = zoomState.scale;
 
-  // Use width to scale — this makes the container's scroll area grow
-  // so the user can pan in every direction, including left.
   if (zoomState.naturalW > 0) {
+    // Scale the image via width, keeping layout size in sync
     modalImage.style.width = `${zoomState.naturalW * s}px`;
-    modalImage.style.maxWidth = 'none';       // override any inherited max-width
+    modalImage.style.maxWidth = 'none';
     modalImage.style.height = 'auto';
-    modalImage.style.transform = `rotate(${modalRotation}deg)`;
   } else {
-    // Fallback if natural size isn't known yet
-    modalImage.style.transform = `rotate(${modalRotation}deg) scale(${s})`;
+    // Fallback before natural size is known
+    modalImage.style.width = '100%';
+    modalImage.style.maxWidth = 'none';
+    modalImage.style.height = 'auto';
   }
 
-  // Align origin so the top-left stays anchored
-  modalImage.style.transformOrigin = 'top left';
-  modalImage.style.display = 'block';
+  // Apply rotation via the wrapper — keeps layout math intact
+  applyModalRotation();
 
   zoomLabel.textContent = `${Math.round(s * 100)}%`;
 }
@@ -2221,7 +2221,10 @@ function setZoom(newScale, fitMode = null) {
 
 function zoomIn() { setZoom(zoomState.scale * 1.25); }
 function zoomOut() { setZoom(zoomState.scale / 1.25); }
-function zoomReset() { setZoom(1); }
+function zoomReset() {
+  modalRotation = 0;
+  setZoom(1);
+}
 function zoomFitWidth() {
   if (!zoomState.naturalW) return;
   const containerW = imageScroll.clientWidth - 32;
@@ -2233,28 +2236,55 @@ function zoomFitHeight() {
   setZoom(containerH / zoomState.naturalH, 'height');
 }
 // ============================================================
-//  Modal image rotation (visual only, does not affect AI extraction)
+//  Rotate by ±90° and refresh zoom (to re-sync offsets)
 // ============================================================
 function rotateModalImage(degrees) {
   modalRotation = (modalRotation + degrees + 360) % 360;
-  applyModalRotation();
+  // Re-run zoom so the scroll bounds are recalculated after rotation
+  applyZoom();
 }
 
+// ============================================================
+//  Rotation — applied to the wrapper, not the image
+// ============================================================
 function applyModalRotation() {
-  const s = zoomState.scale;
+  if (!imageRotator) return;
 
-  if (zoomState.naturalW > 0) {
-    modalImage.style.width = `${zoomState.naturalW * s}px`;
-    modalImage.style.maxWidth = 'none';
-    modalImage.style.height = 'auto';
-    modalImage.style.transform = `rotate(${modalRotation}deg)`;
-  } else {
-    modalImage.style.transform = `rotate(${modalRotation}deg) scale(${s})`;
+  // For a rotation of 90° or 270°, we need to swap the scroll bounds
+  // so the rotated image is fully reachable.
+  //
+  // The wrapper rotates around its top-left corner.
+  // After a 90° rotation, the element's visual bounds are:
+  //   visualWidth  = wrapper.offsetHeight
+  //   visualHeight = wrapper.offsetWidth
+  //
+  // To keep it visible, shift the wrapper by its original width/height
+  // depending on the rotation angle.
+
+  const rad = modalRotation * Math.PI / 180;
+  const cos = Math.cos(rad);
+  const sin = Math.sin(rad);
+
+  const w = modalImage.offsetWidth;
+  const h = modalImage.offsetHeight;
+
+  // Compute the translation needed to keep the rotated image
+  // anchored at the top-left of the scroll container
+  let tx = 0;
+  let ty = 0;
+
+  if (modalRotation === 90) {
+    tx = h;
+  } else if (modalRotation === 180) {
+    tx = w;
+    ty = h;
+  } else if (modalRotation === 270) {
+    ty = w;
   }
 
-  modalImage.style.transformOrigin = 'top left';
-  modalImage.style.display = 'block';
+  imageRotator.style.transform = `translate(${tx}px, ${ty}px) rotate(${modalRotation}deg)`;
 }
+
 // ============================================================
 //  Edit modal
 // ============================================================
@@ -2271,6 +2301,11 @@ function openEditModal(taskId) {
   zoomState.scale = 1; zoomState.naturalW = 0; zoomState.naturalH = 0; zoomState.fitMode = null;
   modalRotation = 0;
   zoomLabel.textContent = '100%';
+
+  modalRotation = 0;
+  if (imageRotator) {
+    imageRotator.style.transform = 'none';
+  }
 
   modalImage.onload = () => {
     zoomState.naturalW = modalImage.naturalWidth;
@@ -2295,6 +2330,10 @@ function closeEditModal() {
   zoomState.naturalH = 0;
   zoomState.fitMode = null;
   modalRotation = 0;
+  // Reset the wrapper rotation
+  if (imageRotator) {
+    imageRotator.style.transform = 'none';
+  }
 }
 
 function getFieldHint(path) {
