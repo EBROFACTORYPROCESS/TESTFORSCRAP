@@ -82,6 +82,7 @@ let inputMethod = 'folder'; // 'folder' | 'upload'
 let modalRotation = 0;
 let _producerActive = false;      // is the conversion loop still running?
 let _consumerRunning = false;     // is the AI consumer loop running?
+let wakeLock = null;
 
 const zoomState = { scale: 1, naturalW: 0, naturalH: 0, fitMode: null };
 
@@ -781,6 +782,49 @@ function renderQueueThrottled() {
     _renderQueueThrottle = null;
   }, 300);
 }
+// ============================================================
+//  Wake Lock helpers — prevent the screen from sleeping
+//  while the app is processing
+// ============================================================
+async function requestWakeLock() {
+  try {
+    if (!('wakeLock' in navigator)) {
+      console.warn('[wakeLock] Screen Wake Lock API not supported by this browser.');
+      return;
+    }
+    if (wakeLock) {
+      // Already holding a lock
+      return;
+    }
+    wakeLock = await navigator.wakeLock.request('screen');
+    wakeLock.addEventListener('release', () => {
+      console.log('[wakeLock] released');
+      wakeLock = null;
+    });
+    console.log('[wakeLock] acquired');
+  } catch (err) {
+    console.warn(`[wakeLock] request failed: ${err.name} — ${err.message}`);
+  }
+}
+
+async function releaseWakeLock() {
+  if (!wakeLock) return;
+  try {
+    await wakeLock.release();
+    // The 'release' event listener will set wakeLock = null
+  } catch (err) {
+    console.warn(`[wakeLock] release failed: ${err.name} — ${err.message}`);
+    wakeLock = null;
+  }
+}
+
+// Re-acquire the lock if the page becomes visible again
+// (browsers automatically release the lock when the tab is hidden)
+document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible' && _consumerRunning) {
+    await requestWakeLock();
+  }
+});
 
 function statusLabel(s) {
   return {
@@ -842,6 +886,9 @@ async function onExtractClick() {
 async function startConsumer(apiKey, platform) {
   if (_consumerRunning) return;
   _consumerRunning = true;
+
+  // Prevent the screen from sleeping while we're processing
+  await requestWakeLock();
 
   console.log('[consumer] started');
 
@@ -953,6 +1000,8 @@ async function startConsumer(apiKey, platform) {
   _consumerRunning = false;
   console.log('[consumer] stopped');
 
+  await releaseWakeLock();
+  
   if (platform === 'deepseek') fetchDeepSeekBalance();
 
   // Final render
@@ -1107,6 +1156,7 @@ async function retryOne(id) {
   if (!task || task.status !== 'error') return;
 
   isRunning = true;
+  await requestWakeLock();
   updateButtonState();
   updateLocalModeButtons();
 
@@ -1175,6 +1225,7 @@ async function retryOne(id) {
   }
 
   isRunning = false;
+  await releaseWakeLock(); 
   renderQueue();
   updateButtonState();
   updateLocalModeButtons();
