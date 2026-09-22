@@ -111,10 +111,7 @@
             🚀 Auto-process as files are added
           </label>
         </div>
-        <label style="display:flex; align-items:center; gap:8px; margin-top:10px; font-size:13px; color:#555;">
-          <input type="checkbox" id="autoProcessToggle" checked>
-          🚀 Auto-process as files are added (recommended for large batches)
-        </label>
+
         <!-- Upload Panel -->
         <div class="input-method-panel" data-method="upload" id="uploadPanel">
           <div class="upload-area" id="uploadArea">
@@ -131,13 +128,19 @@
             <button class="btn btn-retry-all" id="retryAllBtn" disabled>🔁 Retry Failed</button>
             <button class="btn btn-clear" id="clearBtn" disabled>🗑️ Clear</button>
           </div>
+          <label style="display:flex; align-items:center; gap:8px; margin-top:10px; font-size:13px; color:#555;">
+            <input type="checkbox" id="autoProcessToggle" checked>
+            🚀 Auto-process as files are added (recommended for large batches)
+          </label>
         </div>
+
         <div class="compress-progress-wrap" id="compressProgressWrap" style="display: none;">
           <div class="compress-progress-label" id="compressProgressLabel"></div>
           <div class="compress-progress-bar-bg">
             <div class="compress-progress-bar" id="compressProgressBar"></div>
           </div>
         </div>
+
         <!-- Shared Settings -->
         <div class="field" style="margin-top: 14px;">
           <label for="pathPrefix">Path Prefix (prepended to <code>_file</code>)</label>
@@ -156,21 +159,21 @@
     <!-- ============================================================
          RIGHT COLUMN — Queue & Progress
          ============================================================ -->
-  <main class="col-content">
-    <div class="card" id="sharedQueueCard">
-      <div class="status" id="status"></div>
-  
-      <div class="progress-bar-wrap" id="progressWrap" style="display: none;">
-        <div class="progress-bar" id="progressBar"></div>
+    <main class="col-content">
+      <div class="card" id="sharedQueueCard">
+        <div class="status" id="status"></div>
+
+        <div class="progress-bar-wrap" id="progressWrap" style="display: none;">
+          <div class="progress-bar" id="progressBar"></div>
+        </div>
+
+        <div class="summary" id="summary" style="display: none;"></div>
+
+        <div class="queue-scroll" id="queueScroll">
+          <div class="queue-list" id="queueList"></div>
+        </div>
       </div>
-  
-      <div class="summary" id="summary" style="display: none;"></div>
-  
-      <div class="queue-scroll" id="queueScroll">
-        <div class="queue-list" id="queueList"></div>
-      </div>
-    </div>
-  </main>
+    </main>
 
   </div>
 
