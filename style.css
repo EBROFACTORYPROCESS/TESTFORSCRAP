@@ -834,13 +834,19 @@ td.cell-category-supplier {
 .image-scroll img {
   display: block;
   margin: 0;
-  transform-origin: top left;
-  transition: width 0.1s ease-out;
   box-shadow: 0 2px 10px rgba(0,0,0,0.15);
   background: #fff;
   cursor: grab;
   user-select: none;
 }
+/* Rotator wrapper: applies rotation independently of the image's width-based zoom */
+.image-rotator {
+  display: inline-block;
+  transform-origin: top left;
+  transition: transform 0.15s ease-out;
+  will-change: transform;
+}
+
 .image-scroll img.dragging { cursor: grabbing; transition: none; }
 
 .fields-pane {
