@@ -43,7 +43,7 @@ const PLATFORMS = {
     // This fallback is used only if the selector has no stored value.
     defaultModel: 'gemini-3.6-flash',
     endpoint: (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
-    keyHint: 'Get a free key at aistudio.google.com',
+    keyHint: 'Get a free key at <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer">aistudio.google.com</a>',
     placeholder: 'Paste your Gemini API Key...',
     badgeClass: 'gemini',
     // Available Gemini models with their known free-tier limits.
