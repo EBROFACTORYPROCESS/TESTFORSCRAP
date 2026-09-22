@@ -2192,9 +2192,23 @@ function getDisplayHeader(path) {
 // ============================================================
 function applyZoom() {
   const s = zoomState.scale;
-  // Preserve the current rotation
-  modalImage.style.transformOrigin = modalRotation === 0 ? 'top center' : 'center center';
-  modalImage.style.transform = `rotate(${modalRotation}deg) scale(${s})`;
+
+  // Use width to scale — this makes the container's scroll area grow
+  // so the user can pan in every direction, including left.
+  if (zoomState.naturalW > 0) {
+    modalImage.style.width = `${zoomState.naturalW * s}px`;
+    modalImage.style.maxWidth = 'none';       // override any inherited max-width
+    modalImage.style.height = 'auto';
+    modalImage.style.transform = `rotate(${modalRotation}deg)`;
+  } else {
+    // Fallback if natural size isn't known yet
+    modalImage.style.transform = `rotate(${modalRotation}deg) scale(${s})`;
+  }
+
+  // Align origin so the top-left stays anchored
+  modalImage.style.transformOrigin = 'top left';
+  modalImage.style.display = 'block';
+
   zoomLabel.textContent = `${Math.round(s * 100)}%`;
 }
 
@@ -2227,12 +2241,20 @@ function rotateModalImage(degrees) {
 }
 
 function applyModalRotation() {
-  // Combine rotation with the existing zoom transform
   const s = zoomState.scale;
-  // transform-origin at center makes rotation look natural
-  modalImage.style.transformOrigin = 'center center';
-  modalImage.style.transform = `rotate(${modalRotation}deg) scale(${s})`;
-}  
+
+  if (zoomState.naturalW > 0) {
+    modalImage.style.width = `${zoomState.naturalW * s}px`;
+    modalImage.style.maxWidth = 'none';
+    modalImage.style.height = 'auto';
+    modalImage.style.transform = `rotate(${modalRotation}deg)`;
+  } else {
+    modalImage.style.transform = `rotate(${modalRotation}deg) scale(${s})`;
+  }
+
+  modalImage.style.transformOrigin = 'top left';
+  modalImage.style.display = 'block';
+}
 // ============================================================
 //  Edit modal
 // ============================================================
