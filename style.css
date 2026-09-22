@@ -31,38 +31,8 @@ h1 { font-size: 22px; margin-bottom: 4px; }
   border-bottom: 1px solid #eee;
 }
 
-/* Queue card fills the right column and scrolls internally */
-#sharedQueueCard {
-  display: flex;
-  flex-direction: column;
-  flex: 1;
-  min-height: 0;
-  margin-bottom: 0;
-  overflow: hidden;        /* clip overflow so the inner scroller takes over */
-}
-
-/* Scrollable wrapper for the queue */
-.queue-scroll {
-  flex: 1;
-  overflow-y: auto;
-  min-height: 0;
-  margin-top: 12px;
-  padding-right: 6px;
-}
-
-/* Optional: subtle scrollbar styling */
-.queue-scroll::-webkit-scrollbar {
-  width: 8px;
-}
-.queue-scroll::-webkit-scrollbar-thumb {
-  background: #c8c8c8;
-  border-radius: 4px;
-}
-.queue-scroll::-webkit-scrollbar-thumb:hover {
-  background: #a0a0a0;
-}
 /* ============================================================
-   Two-column layout
+   Two-column layout — FIXED HEIGHT, both columns fill it
    ============================================================ */
 .layout {
   display: grid;
@@ -70,9 +40,9 @@ h1 { font-size: 22px; margin-bottom: 4px; }
   gap: 20px;
   align-items: stretch;
   margin-bottom: 20px;
-  /* KEY: limit the layout height to what's left after the header */
-  height: calc(100vh - 140px);
-  min-height: 400px;   /* never collapse below this if the window is tiny */
+  height: calc(100dvh - 140px);
+  min-height: 400px;
+  overflow: hidden;
 }
 
 .col-config {
@@ -81,7 +51,8 @@ h1 { font-size: 22px; margin-bottom: 4px; }
   gap: 20px;
   min-width: 0;
   height: 100%;
-  overflow-y: auto;        /* allow the config column to scroll if it's too tall */
+  min-height: 0;
+  overflow-y: auto;
   padding-right: 4px;
 }
 
@@ -91,6 +62,8 @@ h1 { font-size: 22px; margin-bottom: 4px; }
   gap: 20px;
   min-width: 0;
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .col-config .card,
@@ -99,7 +72,52 @@ h1 { font-size: 22px; margin-bottom: 4px; }
 }
 
 @media (max-width: 1100px) {
-  .layout { grid-template-columns: 1fr; }
+  .layout {
+    grid-template-columns: 1fr;
+    height: auto;
+    overflow: visible;
+  }
+  .col-config,
+  .col-content {
+    height: auto;
+    overflow: visible;
+  }
+  #sharedQueueCard {
+    max-height: 60vh;
+  }
+}
+
+/* ============================================================
+   Queue card — fills right column, scrolls internally
+   ============================================================ */
+#sharedQueueCard {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-bottom: 0;
+  overflow: hidden;
+}
+
+.queue-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+  max-height: 100%;
+  margin-top: 12px;
+  padding-right: 6px;
+}
+
+.queue-scroll::-webkit-scrollbar {
+  width: 8px;
+}
+.queue-scroll::-webkit-scrollbar-thumb {
+  background: #c8c8c8;
+  border-radius: 4px;
+}
+.queue-scroll::-webkit-scrollbar-thumb:hover {
+  background: #a0a0a0;
 }
 
 /* ============================================================
@@ -388,7 +406,7 @@ h1 { font-size: 22px; margin-bottom: 4px; }
    Queue list
    ============================================================ */
 .queue-list {
-  margin-top: 0;          /* the wrapper already handles spacing */
+  margin-top: 0;
 }
 .queue-item {
   display: flex;
@@ -847,14 +865,12 @@ td.cell-category-supplier {
   cursor: grab;
   user-select: none;
 }
-/* Rotator wrapper: applies rotation independently of the image's width-based zoom */
 .image-rotator {
   display: inline-block;
   transform-origin: top left;
   transition: transform 0.15s ease-out;
   will-change: transform;
 }
-
 .image-scroll img.dragging { cursor: grabbing; transition: none; }
 
 .fields-pane {
@@ -983,6 +999,7 @@ td.cell-category-supplier {
 .input-method-panel[data-method].hidden {
   display: none !important;
 }
+
 /* ============================================================
    Error Summary Panel
    ============================================================ */
@@ -1102,6 +1119,7 @@ td.cell-category-supplier {
   background: #e3f2fd;
   border-color: #4a90e2;
 }
+
 /* ---------- Compression Progress ---------- */
 .compress-progress-wrap {
   margin-top: 12px;
