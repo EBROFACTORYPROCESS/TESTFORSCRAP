@@ -2522,6 +2522,9 @@ function onModalSave() {
   if (successTasks.length) renderResultTable(successTasks);
 
   showStatus(`💾 Saved edits for ${task.file.name}${task.edited ? ' (marked as edited)' : ''}.`, 'success');
+  if (document.getElementById('correctionPanel')?.style.display === 'block') {
+    renderCorrectionLibrary();
+  }
 }
 
 function onModalReset() {
@@ -3259,7 +3262,64 @@ function clearCorrectionLibrary() {
   localStorage.removeItem(CORRECTION_LIBRARY_KEY);
   console.log('[correction] Library cleared');
 }
+// ------------------------------------------------------------
+//  Correction Library UI
+// ------------------------------------------------------------
+function renderCorrectionLibrary() {
+  const list = document.getElementById('correctionList');
+  if (!list) return;
 
+  const lib = loadCorrectionLibrary();
+  if (!lib.length) {
+    list.innerHTML = '<p class="hint">No corrections recorded yet. Edit an extraction to start building the library.</p>';
+    return;
+  }
+
+  const sorted = [...lib].sort((a, b) => b.count - a.count);
+
+  const html = sorted.map(r => {
+    const active = r.count >= CORRECTION_MIN_COUNT;
+    const badge = active
+      ? '<span style="background:#d1e7dd;color:#0f5132;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">ACTIVE</span>'
+      : '<span style="background:#fff3cd;color:#664d03;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:600;">pending</span>';
+
+    return `
+      <div style="display:flex; align-items:center; gap:12px; padding:8px 10px; border:1px solid #eee; border-radius:6px; margin-bottom:6px; font-size:12px;">
+        <span style="font-family: ui-monospace, monospace; color:#0b5ed7; min-width:220px;">${escapeHtml(r.path)}</span>
+        <span style="color:#b02a37; text-decoration:line-through;">"${escapeHtml(r.aiValue ?? 'null')}"</span>
+        <span style="color:#666;">→</span>
+        <span style="color:#0f5132; font-weight:600;">"${escapeHtml(r.userValue ?? 'null')}"</span>
+        <span style="margin-left:auto; color:#666;">×${r.count}</span>
+        ${badge}
+      </div>
+    `;
+  }).join('');
+
+  list.innerHTML = html;
+}
+
+// Wire up the toggle + clear buttons
+document.addEventListener('DOMContentLoaded', () => {
+  const toggleBtn = document.getElementById('toggleCorrectionsBtn');
+  const clearBtn = document.getElementById('clearCorrectionsBtn');
+  const panel = document.getElementById('correctionPanel');
+
+  if (toggleBtn && panel) {
+    toggleBtn.addEventListener('click', () => {
+      const visible = panel.style.display !== 'none';
+      panel.style.display = visible ? 'none' : 'block';
+      if (!visible) renderCorrectionLibrary();
+    });
+  }
+
+  if (clearBtn) {
+    clearBtn.addEventListener('click', () => {
+      if (!confirm('Clear the entire correction library?')) return;
+      clearCorrectionLibrary();
+      renderCorrectionLibrary();
+    });
+  }
+});
 // Expose to window so you can call them from the Console
 window.showCorrectionLibrary = showCorrectionLibrary;
 window.clearCorrectionLibrary = clearCorrectionLibrary;
