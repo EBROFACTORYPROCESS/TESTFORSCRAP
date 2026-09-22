@@ -744,7 +744,9 @@ function renderQueue() {
       ? `${task.resizeInfo.original} → ${task.resizeInfo.resized} · ${task.resizeInfo.originalKB}KB → ${task.resizeInfo.resizedKB}KB`
       : `${(task.file.size / 1024).toFixed(0)} KB`;
     const errorLine = task.error
-      ? `<div class="meta" style="color:#b02a37;">${escapeHtml(task.error)}</div>` : '';
+      ? `<div class="meta" style="color:${task.invalidImage ? '#b02a37' : '#b02a37'}; font-weight:${task.invalidImage ? '600' : '400'};">
+           ${task.invalidImage ? '🚫 ' : ''}${escapeHtml(task.error)}
+         </div>` : '';
     const editedLine = task.edited
       ? `<div class="meta" style="color:#217346;">✏️ Manually edited</div>` : '';
     const movedLine = task.movedTo
@@ -942,8 +944,15 @@ async function startConsumer(apiKey, platform) {
       task.error = null;
     } catch (err) {
       console.error(task.file.name, err);
-      task.error = err.message || 'Unknown error';
-      task.status = 'error';
+
+      if (err.invalidImage) {
+        task.error = 'Invalid image — not an EBRO Control Calidad form';
+        task.status = 'error';
+        task.invalidImage = true;
+      } else {
+        task.error = err.message || 'Unknown error';
+        task.status = 'error';
+      }
     }
 
     // ──────────────────────────────────────────────────────────
@@ -1109,9 +1118,15 @@ async function runBatch(tasks, apiKey) {
       success++;
     } catch (err) {
       console.error(task.file.name, err);
-      task.error = err.message || 'Unknown error';
-      task.status = 'error';
-      failed++;
+
+      if (err.invalidImage) {
+        task.error = 'Invalid image — not an EBRO Control Calidad form';
+        task.status = 'error';
+        task.invalidImage = true;
+      } else {
+        task.error = err.message || 'Unknown error';
+        task.status = 'error';
+      }
     }
 
     done++;
@@ -1222,12 +1237,18 @@ async function retryOne(id) {
     task.json = json;
     task.originalJson = JSON.parse(JSON.stringify(json));
     task.status = 'success';      task.error = null;
-  } catch (err) {
-  console.error(err);
-  task.error = err.message || 'Unknown error';
-  task.status = 'error';
-}
+    } catch (err) {
+      console.error(task.file.name, err);
 
+      if (err.invalidImage) {
+        task.error = 'Invalid image — not an EBRO Control Calidad form';
+        task.status = 'error';
+        task.invalidImage = true;
+      } else {
+        task.error = err.message || 'Unknown error';
+        task.status = 'error';
+      }
+    }
   // Move file based on new outcome
   if (inputMethod === 'folder' && task.localHandle && task.localName) {
     try {
@@ -1333,6 +1354,9 @@ async function extractOneWithRetry(task, apiKey, platform) {
     } catch (err) {
       lastErr = err;
       const msg = String(err.message || '').toLowerCase();
+      // Invalid images should NOT be retried — they will always fail
+      if (err.invalidImage) throw err;
+
       const isTransient = err.transient === true ||
         /high demand|overloaded|temporarily|try again|rate limit|503|502|504|429|insufficient/i.test(msg);
       if (!isTransient || attempt === MAX_ATTEMPTS) throw err;
@@ -1420,6 +1444,17 @@ async function callGemini({ base64, mimeType, prompt, apiKey }) {
     e.transient = true;
     throw e;
   }
+    // In callGemini(), before "return postProcess(parsed);"
+  parsed = postProcess(parsed);
+
+  // Detect invalid image and throw a specific error
+  if (parsed.header && parsed.header._validity === 'invalid') {
+    const e = new Error('INVALID_IMAGE');
+    e.invalidImage = true;
+    throw e;
+  }
+
+  return parsed;
   return postProcess(parsed);
 }
 
@@ -1488,6 +1523,17 @@ async function callDeepSeek({ base64, mimeType, prompt, apiKey }) {
     e.transient = true;
     throw e;
   }
+  // In callDeepseek(), before "return postProcess(parsed);"
+  parsed = postProcess(parsed);
+
+  // Detect invalid image and throw a specific error
+  if (parsed.header && parsed.header._validity === 'invalid') {
+    const e = new Error('INVALID_IMAGE');
+    e.invalidImage = true;
+    throw e;
+  }
+
+  return parsed;
   return postProcess(parsed);
 }
 
@@ -1698,6 +1744,7 @@ function removeHiddenFields(obj) {
   if (obj.header && typeof obj.header === 'object') {
     delete obj.header.company;
     delete obj.header.document_type;
+    delete obj.header._validity;   // ← NEW
   }
   return obj;
 }
@@ -2052,7 +2099,8 @@ function renderResultTable(tasks) {
   const headerSet = new Set(['_file']);
   rows.forEach(r => Object.keys(r).forEach(k => {
     if (k === '_taskId' || k === '_edited' || k === '_signatureWarning') return;
-    if (HIDDEN_FIELDS.includes(k)) return;   // ← hide company, document_type
+    if (k === 'header._validity') return;   // ← NEW
+    if (HIDDEN_FIELDS.includes(k)) return;
     headerSet.add(k);
   }));
   const headers = Array.from(headerSet);
