@@ -2866,35 +2866,76 @@ async function processLocalBatch() {
   _producerActive = false;   // manual trigger: no producer running
   startConsumer(apiKey, platform);
 }
+/**
+ * Move a processed file to the destination folder.
+ *
+ * Instead of moving the original file from disk, this writes the RESIZED JPEG
+ * (stored in task.resizedBlob) to the destination folder, and then deletes
+ * the original source file.
+ *
+ * For Local Folder mode:
+ *   - destination = localHandles.readed (success) or localHandles.error (failure)
+ *   - filename changes extension from .heic/.jpg to .jpg
+ *
+ * Falls back to copying the original file if the resized blob is missing.
+ */
 async function moveLocalFile(task, targetDirHandle) {
   if (!task.localHandle || !task.localName) {
-    throw new Error('Missing local handle');
+    throw new Error('Missing local handle or name');
   }
 
-  let finalName = task.localName;
-  let destFileHandle;
+  // ──────────────────────────────────────────────────────────
+  //  Determine the destination filename.
+  //  Always end with .jpg because we're writing the resized JPEG.
+  // ──────────────────────────────────────────────────────────
+  const originalName = task.localName;
+  const dot = originalName.lastIndexOf('.');
+  const base = dot > 0 ? originalName.slice(0, dot) : originalName;
+  let finalName = `${base}.jpg`;
+
+  // Collision handling — append timestamp if the file already exists
   let attempts = 0;
   while (attempts < 3) {
     try {
-      destFileHandle = await targetDirHandle.getFileHandle(finalName, { create: false });
-      const dot = finalName.lastIndexOf('.');
-      const base = dot > 0 ? finalName.slice(0, dot) : finalName;
-      const ext = dot > 0 ? finalName.slice(dot) : '';
+      await targetDirHandle.getFileHandle(finalName, { create: false });
       const ts = new Date().toISOString().replace(/[:.]/g, '-');
-      finalName = `${base}_${ts}${ext}`;
+      finalName = `${base}_${ts}.jpg`;
       attempts++;
     } catch (e) {
-      break;
+      break; // no collision
     }
   }
 
-  const sourceFile = await task.localHandle.getFile();
+  // ──────────────────────────────────────────────────────────
+  //  Write the RESIZED JPEG (from task.resizedBlob) to the destination.
+  //  Fall back to the original file if no resized blob is available.
+  // ──────────────────────────────────────────────────────────
+  let sourceBlob;
+  if (task.resizedBlob) {
+    sourceBlob = task.resizedBlob;
+  } else {
+    // Fallback: copy the original file (in case resize failed)
+    const sourceFile = await task.localHandle.getFile();
+    sourceBlob = sourceFile;
+    console.warn(`[move] No resized blob for ${originalName}, falling back to original file`);
+  }
+
   const destHandle = await targetDirHandle.getFileHandle(finalName, { create: true });
   const writable = await destHandle.createWritable();
-  await writable.write(sourceFile);
+  await writable.write(sourceBlob);
   await writable.close();
 
-  await task.localHandle.remove();
+  // ──────────────────────────────────────────────────────────
+  //  Delete the original source file
+  // ──────────────────────────────────────────────────────────
+  try {
+    await task.localHandle.remove();
+  } catch (removeErr) {
+    console.warn(`[move] Could not delete original ${originalName}:`, removeErr);
+    // Not fatal — the file was successfully written to the destination.
+  }
+
+  console.log(`[move] Saved ${finalName} (${Math.round(sourceBlob.size / 1024)} KB)`);
 
   return finalName;
 }
