@@ -51,6 +51,10 @@ const localPickReadedBtn = document.getElementById('localPickReadedBtn');
 const localPickErrorBtn = document.getElementById('localPickErrorBtn');
 const localLoadBtn = document.getElementById('localLoadBtn');
 const localProcessBtn = document.getElementById('localProcessBtn');
+const errorPanel = document.getElementById('errorPanel');
+const errorList = document.getElementById('errorList');
+const errorCount = document.getElementById('errorCount');
+const downloadErrorListBtn = document.getElementById('downloadErrorListBtn');
 
 // Modal
 const modalOverlay = document.getElementById('modalOverlay');
@@ -191,7 +195,9 @@ function attachEventListeners() {
   retryAllBtn.addEventListener('click', onRetryAllClick);
   clearBtn.addEventListener('click', onClearClick);
   downloadExcelBtn.addEventListener('click', onDownloadExcel);
-
+  if (downloadErrorListBtn) {
+    downloadErrorListBtn.addEventListener('click', onDownloadErrorList);
+  }
   // Zoom
   zoomInBtn.addEventListener('click', zoomIn);
   zoomOutBtn.addEventListener('click', zoomOut);
@@ -772,8 +778,60 @@ function renderQueue() {
   queueList.querySelectorAll('[data-retry-id]').forEach(btn => {
     btn.addEventListener('click', () => retryOne(parseInt(btn.dataset.retryId, 10)));
   });
+  // ← ADD THIS: refresh the error panel every time the queue re-renders
+  renderErrorList();
 }
+// ============================================================
+//  Error Files List
+// ============================================================
+function renderErrorList() {
+  if (!errorList || !errorPanel || !errorCount) return;
 
+  const failedTasks = queue.filter(t => t.status === 'error');
+
+  // Hide the panel when there are no errors
+  if (failedTasks.length === 0) {
+    errorPanel.style.display = 'none';
+    errorCount.textContent = '(0)';
+    errorList.innerHTML = '';
+    return;
+  }
+
+  errorPanel.style.display = 'flex';
+  errorCount.textContent = `(${failedTasks.length})`;
+
+  errorList.innerHTML = '';
+
+  failedTasks.forEach(task => {
+    const el = document.createElement('div');
+    el.className = 'error-item';
+
+    const sizeInfo = task.resizeInfo && !task.resizeInfo.error
+      ? `${task.resizeInfo.originalKB}KB → ${task.resizeInfo.resizedKB}KB`
+      : '';
+
+    const reason = task.error || 'Unknown error';
+
+    el.innerHTML = `
+      <img src="${task.previewUrl || ''}" alt="" />
+      <div class="info">
+        <div class="name">${escapeHtml(task.file.name)}</div>
+        <div class="meta">${escapeHtml(sizeInfo)}${sizeInfo ? ' · ' : ''}${escapeHtml(reason)}</div>
+      </div>
+      <button class="retry-btn" data-error-retry-id="${task.id}">🔁 Retry</button>
+    `;
+
+    errorList.appendChild(el);
+  });
+
+  // Attach retry handlers
+  errorList.querySelectorAll('[data-error-retry-id]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = parseInt(btn.dataset.errorRetryId, 10);
+      retryOne(id);
+    });
+  });
+}
 // ============================================================
 //  Throttled queue render (max once per 300ms)
 // ============================================================
@@ -1302,6 +1360,7 @@ function onClearClick() {
   });
   queue = [];
   renderQueue();
+  renderErrorList();
   progressWrap.style.display = 'none';
   progressBar.style.width = '0%';
   summaryEl.style.display = 'none';
@@ -2693,7 +2752,59 @@ function onDownloadExcel() {
     'success'
   );
 }
+// ============================================================
+//  Download Error List as Excel
+// ============================================================
+function onDownloadErrorList() {
+  const failedTasks = queue.filter(t => t.status === 'error');
 
+  if (!failedTasks.length) {
+    showStatus('No error files to export.', 'error');
+    return;
+  }
+
+  const wb = XLSX.utils.book_new();
+
+  // Sheet: Error Files
+  const rows = failedTasks.map((t, i) => {
+    // Try to flatten whatever partial JSON we may have (likely null)
+    const flat = t.json ? flattenJson(t.json) : {};
+
+    return {
+      '#': i + 1,
+      _file: buildFilePathForTask(t),
+      _error: t.error || 'Unknown error',
+      _invalidImage: t.invalidImage ? 'YES' : 'no',
+      _sizeOriginalKB: t.resizeInfo?.originalKB ?? '',
+      _sizeResizedKB: t.resizeInfo?.resizedKB ?? '',
+      _status: t.status,
+      _movedTo: t.movedTo || '',
+      ...flat
+    };
+  });
+
+  // Collect all columns: fixed ones first, then any field from the JSON
+  const fixedCols = ['#', '_file', '_error', '_invalidImage', '_sizeOriginalKB', '_sizeResizedKB', '_status', '_movedTo'];
+  const extraCols = new Set();
+  rows.forEach(r => Object.keys(r).forEach(k => {
+    if (!fixedCols.includes(k)) extraCols.add(k);
+  }));
+  const headers = [...fixedCols, ...Array.from(extraCols)];
+
+  const aoa = [headers, ...rows.map(r => headers.map(h => r[h] ?? ''))];
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = headers.map(h => ({
+    wch: h === '_file' || h === '_error' ? 50 : 18
+  }));
+
+  XLSX.utils.book_append_sheet(wb, ws, 'Error Files');
+
+  const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+  XLSX.writeFile(wb, `ebro-errors-${timestamp}.xlsx`);
+
+  showStatus(`📊 Exported ${rows.length} error row(s).`, 'success');
+}
 // ============================================================
 //  Input Method switching
 // ============================================================
