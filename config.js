@@ -90,6 +90,10 @@ const PLATFORMS = {
 // Loaded from data.json at startup; this is the fallback if fetching fails.
 const FIELD_SCHEMA = {
   header: {
+    _validity: {
+      type: 'string',
+      description: 'Determine whether this image is a valid EBRO "Control Calidad" form. Return EXACTLY one of these two strings: "valid" or "invalid". Return "valid" if the image contains the EBRO form (even partially, damaged, torn, crumpled, folded, or obscured). The form is recognizable by the EBRO logo, the "CONTROL CALIDAD" title, or any of the field labels such as "CÓDIGO CONJUNTO", "CÓDIGO COMPONENTE", "FECHA", "OPERARIO", "MOTIVO RECHACE", etc. Return "invalid" ONLY if the image is completely unrelated to the form — for example: a photo of equipment, a person, a landscape, a screenshot, a white page, or any image with no visible form elements. IMPORTANT: A torn, damaged, partially visible, or badly photographed form is STILL "valid" and must be processed normally.'
+    },
     ticket_category: {
       type: 'string',
       description: 'The category of the ticket, determined by the color of the TOP HEADER BAND of the form. Look at the broad colored strip across the top of the form, just below the EBRO logo area. If that header band is GREEN, return exactly "Process Scrap Parts". If that header band is ORANGE, return exactly "Supplier Claim Parts". Return exactly one of those two strings.'
@@ -130,6 +134,10 @@ const FIELD_SCHEMA = {
 
 // ---- Format validation rules ----
 const FORMAT_RULES = {
+  'header._validity': {
+    test: v => /^(valid|invalid)$/i.test(v.trim()),
+    hint: 'Expected "valid" or "invalid"'
+  },  
   'header.ticket_category': {
     test: v => /^(Process Scrap Parts|Supplier Claim Parts)$/i.test(v.trim()),
     hint: 'Expected "Process Scrap Parts" or "Supplier Claim Parts"'
@@ -170,14 +178,31 @@ function buildPromptText() {
   lines.push('');
   lines.push('CRITICAL RULES:');
   lines.push('');
-  lines.push('1. ORIENTATION: The image may be rotated. Before reading any field, mentally rotate so that the "EBRO" logo is TOP-LEFT and the colored header band runs horizontally across the top.');
+  lines.push('1. VALIDITY CHECK (DO THIS FIRST, BEFORE ANYTHING ELSE):');
+  lines.push('   Determine whether this image shows an EBRO "Control Calidad" form.');
+  lines.push('   Return the result in the "header._validity" field:');
+  lines.push('     - Return "valid" if the image contains ANY part of the form:');
+  lines.push('         · the EBRO logo,');
+  lines.push('         · the "CONTROL CALIDAD" title,');
+  lines.push('         · the colored header band,');
+  lines.push('         · any field label such as "CÓDIGO CONJUNTO", "CÓDIGO COMPONENTE", "FECHA", "OPERARIO", "MOTIVO RECHACE", "OBSERVACIONES", "INSPECTOR", "CALIDAD", "ENCARGADO LÍNEA",');
+  lines.push('         · or any handwritten value inside a box.');
+  lines.push('     - A torn, damaged, crumpled, folded, partially visible, badly lit, or blurred form is STILL "valid" — you must extract whatever is visible and use null for what is missing.');
+  lines.push('     - Return "invalid" ONLY when the image has NO form at all. Examples:');
+  lines.push('         · a photo of equipment, a machine, a vehicle, a person, a building, a landscape;');
+  lines.push('         · a screenshot of a computer screen with no form;');
+  lines.push('         · a blank white or black page;');
+  lines.push('         · a photo of a document that is NOT the EBRO Control Calidad form.');
+  lines.push('   If you return "invalid", still return the full JSON structure but set every other field to null.');
   lines.push('');
-  lines.push('2. TICKET CATEGORY (from the header band color):');
+  lines.push('2. ORIENTATION: The image may be rotated. Before reading any field, mentally rotate so that the "EBRO" logo is TOP-LEFT and the colored header band runs horizontally across the top.');
+  lines.push('');
+  lines.push('3. TICKET CATEGORY (from the header band color):');
   lines.push('   - GREEN header band  → ticket_category = "Process Scrap Parts"');
   lines.push('   - ORANGE header band → ticket_category = "Supplier Claim Parts"');
   lines.push('   Return that exact string in header.ticket_category.');
   lines.push('');
-   lines.push('3. ANTI-DUPLICATION RULE (MANDATORY):');
+   lines.push('4. ANTI-DUPLICATION RULE (MANDATORY):');
   lines.push('   A single piece of handwritten text can only belong to ONE field. It can NEVER appear in two or more fields.');
   lines.push('   Before returning the JSON, perform this verification step:');
   lines.push('     a) Build a list of all non-null values.');
@@ -202,17 +227,17 @@ function buildPromptText() {
   lines.push('     observaciones:  null');
   lines.push('     operario:       null');
   lines.push('');
-  lines.push('4. STRICT FIELD-BOX READING:');
+  lines.push('5. STRICT FIELD-BOX READING:');
   lines.push('   Each value is written INSIDE a specific printed box on the form.');
   lines.push('   Use the box BORDERS (the printed lines) to decide which field a value belongs to.');
   lines.push('   Do NOT guess or "spread" a value to fill empty fields.');
   lines.push('   If a box is EMPTY, return null for that field. An empty box is a valid answer.');
   lines.push('');
-  lines.push('4b. TWO-BOX FIELDS (exception to rule 4):');
+  lines.push('5b. TWO-BOX FIELDS (exception to rule 4):');
   lines.push('   The field "origen_area_zona" is built from TWO adjacent sub-boxes: "AREA" (left) and "ZONA" (right). This is the ONE allowed case where a single output field reads from two printed boxes. Concatenate both values into one string with NO separator.');
   lines.push('   Example: AREA="M1", ZONA="M3" → origen_area_zona = "M1M3".');
   lines.push('');
-  lines.push('5. POSITIONAL ANCHORS (use these to locate each field):');
+  lines.push('6. POSITIONAL ANCHORS (use these to locate each field):');
   lines.push('   - motivo_rechace:   LOWER-LEFT area, under the label "MOTIVO RECHACE"');
   lines.push('   - fecha:            BOTTOM-LEFT, small box with label "FECHA"');
   lines.push('   - operario:         BOTTOM-LEFT, small box with label "OPERARIO" (DIRECTLY BELOW fecha)');
@@ -222,9 +247,9 @@ function buildPromptText() {
   lines.push('   - origen_area_zona: LEFT-MIDDLE, composed of TWO sub-boxes under "ORIGEN": the LEFT one is "AREA" and the RIGHT one is "ZONA". Concatenate them (AREA + ZONA, no separator). Example: AREA="M1", ZONA="M3" → "M1M3". If empty, check the "ZONA O LÍNEA" box elsewhere.');
   lines.push('   These boxes are in DIFFERENT physical locations. A value written in one box cannot appear in another.');
   lines.push('');
-  lines.push('6. Each field description below tells you exactly where its label is and what its value should look like.');
-  lines.push('7. For handwritten values, transcribe exactly what you see.');
-  lines.push('8. SIGNATURE FIELDS — READ CAREFULLY:');
+  lines.push('7. Each field description below tells you exactly where its label is and what its value should look like.');
+  lines.push('8. For handwritten values, transcribe exactly what you see.');
+  lines.push('9. SIGNATURE FIELDS — READ CAREFULLY:');
   lines.push('   The form has THREE independent signature boxes near the bottom:');
   lines.push('     - "Inspector"       (bottom-left)');
   lines.push('     - "Calidad" / "Vº Bº C. CALIDAD"  (bottom-center)');
@@ -240,7 +265,7 @@ function buildPromptText() {
   lines.push('     - the box contains a defect word or description');
   lines.push('   A single letter is NOT a signature. A red line is NOT a signature. Only cursive writing or a 5-character stamp counts.');
   lines.push('   The three boxes are INDEPENDENT — a signature or stamp in one box does NOT imply the others are signed.');
-  lines.push('9. If a non-signature field is empty or illegible, use null. NEVER copy a neighbor value to fill it.');
+  lines.push('10. If a non-signature field is empty or illegible, use null. NEVER copy a neighbor value to fill it.');
   lines.push('');
   lines.push('Return a valid JSON object with the structure below:');
   lines.push('');
