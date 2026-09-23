@@ -9,28 +9,6 @@ const PATH_PREFIX_STORAGE = 'source_path_prefix';
 const MAX_SIZE_STORAGE = 'max_image_size';
 const LOCAL_MODE_STORAGE = 'local_mode_enabled';
 const LOCAL_HANDLE_DB = 'ebro_fs_handles';
-const INPUT_METHOD_STORAGE = 'input_method'; // 'folder' | 'upload'
-const RATE_LIMIT_PER_MIN = 15;
-// ---- Key parameters that must be present for a form to be considered valid ----
-const KEY_PARAMETERS = [
-  { path: 'section_1.codigo_conjunto',    label: 'Código Conjunto' },
-  { path: 'section_1.codigo_rechaz',      label: 'Código Rechazo' },
-  { path: 'section_1.cantidad',           label: 'Cantidad' },
-  { path: 'section_1.codigo_componente',  label: 'Codigo Componente' },
-  { path: 'section_1.origen_area_zona',   label: 'Origen Área/Zona' },
-  { path: 'section_2.fecha',              label: 'Fecha' },
-  { path: 'section_2.operario',           label: 'Operario' },
-  { path: 'section_2.motivo_rechace',      label: 'Motivo rechace' },    // ============================================================
-//  Configuration: platforms, field schema, format rules
-// ============================================================
-
-const PLATFORM_STORAGE = 'ai_platform';
-const API_KEY_STORAGE_PREFIX = 'api_key_';
-const GEMINI_MODEL_STORAGE = 'gemini_model';
-const PATH_PREFIX_STORAGE = 'source_path_prefix';
-const MAX_SIZE_STORAGE = 'max_image_size';
-const LOCAL_MODE_STORAGE = 'local_mode_enabled';
-const LOCAL_HANDLE_DB = 'ebro_fs_handles';
 const INPUT_METHOD_STORAGE = 'input_method';
 const RATE_LIMITS_OVERRIDE_KEY = 'rate_limits_override';
 
