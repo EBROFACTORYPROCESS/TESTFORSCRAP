@@ -385,4 +385,71 @@ function buildPromptText() {
   lines.push('   - fecha:            BOTTOM-LEFT, small box with label "FECHA"');
   lines.push('   - operario:         BOTTOM-LEFT, small box with label "OPERARIO" (DIRECTLY BELOW fecha)');
   lines.push('   - observaciones:    BOTTOM-CENTER, wide box with label "OBSERVACIONES"');
-  lines.push('   - cantidad:         MIDDLE-RIGHT, box labeled "CANTIDAD". The value may include a "+" or "-" between numbers, e.g.
+  lines.push('   - cantidad:         MIDDLE-RIGHT, box labeled "CANTIDAD". The value may include a "+" or "-" between numbers, e.g. "1+1", "2+3". This is NORMAL — return the full expression AS WRITTEN, do NOT collapse it into "11".');
+  lines.push('   - codigo_rechaz:    MIDDLE-LEFT, small box labeled "CÓDIGO RECHAZ"');
+  lines.push('   - origen_area_zona: LEFT-MIDDLE, sourced from ORIGEN (AREA+ZONA) or ZONA O LÍNEA or DETECTADO. See rule 5b.');
+  lines.push('   These boxes are in DIFFERENT physical locations. A value written in one box cannot appear in another.');
+  lines.push('');
+  lines.push('7. Each field description below tells you exactly where its label is and what its value should look like.');
+  lines.push('8. For handwritten values, transcribe exactly what you see.');
+  lines.push('9. SIGNATURE FIELDS — READ CAREFULLY:');
+  lines.push('   The form has THREE independent signature boxes near the bottom:');
+  lines.push('     - "Inspector"       (bottom-left)');
+  lines.push('     - "Calidad" / "Vº Bº C. CALIDAD"  (bottom-center)');
+  lines.push('     - "Encargado" / "ENCARGADO LÍNEA" (bottom-right)');
+  lines.push('   Return "Signed" ONLY IF the box contains one of:');
+  lines.push('     (a) a handwritten CURSIVE signature — continuous flowing strokes forming a name or initials,');
+  lines.push('     (b) a RUBBER STAMP — a stamped mark of about 5 characters, typically 2 letters + 3 digits (e.g. "JE673"), printed in a uniform font.');
+  lines.push('   Return "Not Signed" for ALL OTHER cases, including:');
+  lines.push('     - the box is empty (only the printed label)');
+  lines.push('     - the box contains only a printed red line or underline');
+  lines.push('     - the box contains only a single isolated letter (e.g. "A")');
+  lines.push('     - the box contains only a short numeric code');
+  lines.push('     - the box contains a defect word or description');
+  lines.push('   A single letter is NOT a signature. A red line is NOT a signature. Only cursive writing or a 5-character stamp counts.');
+  lines.push('   The three boxes are INDEPENDENT — a signature or stamp in one box does NOT imply the others are signed.');
+  lines.push('10. If a non-signature field is empty or illegible, use null. NEVER copy a neighbor value to fill it.');
+  lines.push('');
+  lines.push('Return a valid JSON object with the structure below:');
+  lines.push('');
+
+  const obj = {};
+  const sections = Object.keys(FIELD_SCHEMA);
+  sections.forEach(section => {
+    obj[section] = {};
+    Object.keys(FIELD_SCHEMA[section]).forEach(field => {
+      obj[section][field] = FIELD_SCHEMA[section][field].description;
+    });
+  });
+  lines.push(JSON.stringify(obj, null, 2));
+  lines.push('');
+  lines.push('Return ONLY the JSON object. No markdown fences, no explanations.');
+  return lines.join('\n');
+}
+
+function buildJsonSchema() {
+  const properties = {};
+  const sections = Object.keys(FIELD_SCHEMA);
+  sections.forEach(section => {
+    properties[section] = {
+      type: 'object',
+      properties: {},
+      required: Object.keys(FIELD_SCHEMA[section])
+    };
+    Object.keys(FIELD_SCHEMA[section]).forEach(field => {
+      properties[section].properties[field] = {
+        type: FIELD_SCHEMA[section][field].type,
+        description: FIELD_SCHEMA[section][field].description
+      };
+    });
+  });
+  return { type: 'object', properties, required: sections };
+}
+
+function checkFormat(path, value) {
+  const rule = FORMAT_RULES[path];
+  if (!rule) return 'ok';
+  if (value === null || value === undefined || String(value).trim() === '') return 'missing';
+  const s = String(value).trim();
+  try { return rule.test(s) ? 'ok' : 'format-mismatch'; } catch (e) { return 'ok'; }
+}
