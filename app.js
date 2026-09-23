@@ -36,6 +36,12 @@ const geminiModelHint = document.getElementById('geminiModelHint');
 const errorSummary = document.getElementById('errorSummary');
 const rotateLeftBtn = document.getElementById('rotateLeftBtn');
 const rotateRightBtn = document.getElementById('rotateRightBtn');
+const rateLimitsPanel = document.getElementById('rateLimitsPanel');
+const limitRPM = document.getElementById('limitRPM');
+const limitTPM = document.getElementById('limitTPM');
+const limitRPD = document.getElementById('limitRPD');
+const resetRateLimitsBtn = document.getElementById('resetRateLimitsBtn');
+const rateLimitsHint = document.getElementById('rateLimitsHint');
 
 // Local mode elements
 const imsFolderBtn = document.getElementById('imsFolderBtn');
@@ -163,7 +169,12 @@ function attachEventListeners() {
   });
 
   refreshBalanceBtn.addEventListener('click', fetchDeepSeekBalance);
-
+  
+  if (limitRPM) limitRPM.addEventListener('change', onRateLimitChanged);
+  if (limitTPM) limitTPM.addEventListener('change', onRateLimitChanged);
+  if (limitRPD) limitRPD.addEventListener('change', onRateLimitChanged);
+  if (resetRateLimitsBtn) resetRateLimitsBtn.addEventListener('click', onResetRateLimits);
+  
   pathPrefixInput.addEventListener('input', () => {
     localStorage.setItem(PATH_PREFIX_STORAGE, pathPrefixInput.value);
   });
@@ -291,7 +302,103 @@ function updateGeminiModelHint() {
   const model = (PLATFORMS.gemini.models || []).find(m => m.id === selected);
   geminiModelHint.textContent = model ? model.note : '';
 }
+// ============================================================
+//  Rate Limits — user overrides
+// ============================================================
+function loadRateLimitsOverride() {
+  try {
+    const raw = localStorage.getItem(RATE_LIMITS_OVERRIDE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch (e) {
+    return {};
+  }
+}
 
+function saveRateLimitsOverride(obj) {
+  try {
+    localStorage.setItem(RATE_LIMITS_OVERRIDE_KEY, JSON.stringify(obj));
+  } catch (e) {
+    console.warn('Failed to save rate limits override:', e);
+  }
+}
+
+/**
+ * Get the effective limits for the current model.
+ * Priority: user override > model default.
+ */
+function getEffectiveLimits() {
+  const modelId = getCurrentGeminiModel();
+  const model = (PLATFORMS.gemini.models || []).find(m => m.id === modelId);
+  const defaults = (model && model.limits) ? model.limits : { rpm: 15, tpm: 1000000, rpd: 1500 };
+  const overrides = loadRateLimitsOverride();
+  const o = overrides[modelId] || {};
+
+  return {
+    rpm: o.rpm || defaults.rpm,
+    tpm: o.tpm || defaults.tpm,
+    rpd: o.rpd || defaults.rpd,
+    defaults
+  };
+}
+
+/**
+ * Render the rate limits panel inputs.
+ */
+function renderRateLimitsPanel() {
+  if (!rateLimitsPanel) return;
+
+  // Only show for Gemini
+  const platform = getCurrentPlatform();
+  if (platform !== 'gemini') {
+    rateLimitsPanel.style.display = 'none';
+    return;
+  }
+
+  rateLimitsPanel.style.display = 'block';
+
+  const { rpm, tpm, rpd, defaults } = getEffectiveLimits();
+  limitRPM.value = rpm;
+  limitTPM.value = tpm;
+  limitRPD.value = rpd;
+
+  const overridden = (rpm !== defaults.rpm) || (tpm !== defaults.tpm) || (rpd !== defaults.rpd);
+  rateLimitsHint.textContent = overridden
+    ? `⚠️ Custom limits in use. Model defaults: ${defaults.rpm} RPM / ${defaults.tpm.toLocaleString()} TPM / ${defaults.rpd} RPD.`
+    : `These limits are enforced locally to prevent API errors. Raise them if you upgrade your tier.`;
+}
+
+/**
+ * Handle a change in any rate limit input.
+ */
+function onRateLimitChanged() {
+  const modelId = getCurrentGeminiModel();
+  const overrides = loadRateLimitsOverride();
+
+  overrides[modelId] = {
+    rpm: parseInt(limitRPM.value, 10) || null,
+    tpm: parseInt(limitTPM.value, 10) || null,
+    rpd: parseInt(limitRPD.value, 10) || null
+  };
+
+  saveRateLimitsOverride(overrides);
+  renderRateLimitsPanel();
+
+  // Reset the daily counter in the smart rate limiter
+  if (typeof smartRateLimiter !== 'undefined' && smartRateLimiter.reset) {
+    smartRateLimiter.reset();
+  }
+}
+
+/**
+ * Reset the limits for the current model to defaults.
+ */
+function onResetRateLimits() {
+  const modelId = getCurrentGeminiModel();
+  const overrides = loadRateLimitsOverride();
+  delete overrides[modelId];
+  saveRateLimitsOverride(overrides);
+  renderRateLimitsPanel();
+}
 function updatePlatformUI() {
   const platform = getCurrentPlatform();
   const cfg = PLATFORMS[platform];
@@ -319,6 +426,9 @@ function updatePlatformUI() {
   } else if (platform === 'deepseek') {
     balanceContent.innerHTML = 'Enter your API Key to check balance.';
   }
+
+  // Refresh the rate-limits panel (shows/hides based on platform)
+  renderRateLimitsPanel();
 }
 
 async function fetchDeepSeekBalance() {
@@ -901,24 +1011,80 @@ function escapeHtml(str) {
 }
 
 // ============================================================
-//  Rate limiter
+//  Smart Rate Limiter — respects RPM, TPM, and RPD limits
 // ============================================================
-const rateLimiter = {
-  timestamps: [],
-  async wait() {
+const smartRateLimiter = {
+  requestTimestamps: [],   // timestamps of requests in the last 60s
+  tokenUsage: [],          // { timestamp, tokens } for the last 60s
+  dailyRequestCount: 0,
+  dailyResetDate: null,
+
+  /**
+   * Call BEFORE sending an API request.
+   * Waits as needed, then records the request.
+   */
+  async wait(estimatedTokens = 5000) {
+    const limits = getEffectiveLimits();
     const now = Date.now();
-    const windowStart = now - 60_000;
-    this.timestamps = this.timestamps.filter(t => t > windowStart);
-    if (this.timestamps.length >= RATE_LIMIT_PER_MIN) {
-      const oldest = this.timestamps[0];
-      const waitMs = oldest + 60_000 - now + 200;
-      await sleep(waitMs);
-      return this.wait();
+    const oneMinuteAgo = now - 60_000;
+
+    // --- Reset daily counter if the date changed ---
+    const today = new Date().toDateString();
+    if (this.dailyResetDate !== today) {
+      this.dailyRequestCount = 0;
+      this.dailyResetDate = today;
+      console.log('[rate] Daily counter reset');
     }
-    this.timestamps.push(Date.now());
+
+    // --- RPD check ---
+    if (this.dailyRequestCount >= limits.rpd) {
+      throw new Error(`DAILY_LIMIT_REACHED: ${this.dailyRequestCount}/${limits.rpd} requests today. Wait until tomorrow (Pacific midnight).`);
+    }
+
+    // --- Clean up expired entries ---
+    this.requestTimestamps = this.requestTimestamps.filter(t => t > oneMinuteAgo);
+    this.tokenUsage = this.tokenUsage.filter(u => u.timestamp > oneMinuteAgo);
+
+    // --- RPM check ---
+    if (this.requestTimestamps.length >= limits.rpm) {
+      const oldest = this.requestTimestamps[0];
+      const waitMs = oldest + 60_000 - now + 500;
+      console.log(`[rate] RPM limit reached (${this.requestTimestamps.length}/${limits.rpm}). Waiting ${Math.round(waitMs / 1000)}s...`);
+      await sleep(waitMs);
+      return this.wait(estimatedTokens);
+    }
+
+    // --- TPM check ---
+    const currentTokens = this.tokenUsage.reduce((sum, u) => sum + u.tokens, 0);
+    if (currentTokens + estimatedTokens > limits.tpm) {
+      const oldestToken = this.tokenUsage[0];
+      if (oldestToken) {
+        const waitMs = oldestToken.timestamp + 60_000 - now + 500;
+        console.log(`[rate] TPM limit reached (${currentTokens}/${limits.tpm}). Waiting ${Math.round(waitMs / 1000)}s...`);
+        await sleep(waitMs);
+        return this.wait(estimatedTokens);
+      }
+    }
+
+    // --- All checks passed: record this request ---
+    this.requestTimestamps.push(now);
+    this.tokenUsage.push({ timestamp: now, tokens: estimatedTokens });
+    this.dailyRequestCount++;
+
+    console.log(`[rate] Request approved. RPM: ${this.requestTimestamps.length}/${limits.rpm}, TPM: ${currentTokens + estimatedTokens}/${limits.tpm}, RPD: ${this.dailyRequestCount}/${limits.rpd}`);
+  },
+
+  /**
+   * Reset all counters. Called when the user changes the limits.
+   */
+  reset() {
+    this.requestTimestamps = [];
+    this.tokenUsage = [];
+    this.dailyRequestCount = 0;
+    this.dailyResetDate = null;
+    console.log('[rate] Counter reset');
   }
 };
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function onExtractClick() {
   const apiKey = apiKeyInput.value.trim();
@@ -937,7 +1103,7 @@ async function onExtractClick() {
   }
 
   const platform = getCurrentPlatform();
-  _producerActive = false;   // manual trigger: no producer is running
+  _producerActive = false;
   startConsumer(apiKey, platform);
 }
 // ============================================================
@@ -948,12 +1114,10 @@ async function startConsumer(apiKey, platform) {
   if (_consumerRunning) return;
   _consumerRunning = true;
 
-  // Prevent the screen from sleeping while we're processing
   await requestWakeLock();
 
   console.log('[consumer] started');
 
-  // Hide previous result panel (it will reappear when the first result lands)
   resultSection.style.display = 'none';
   progressWrap.style.display = 'block';
   summaryEl.style.display = 'none';
@@ -964,15 +1128,10 @@ async function startConsumer(apiKey, platform) {
     const task = queue.find(t => t.status === 'waiting');
 
     if (!task) {
-      // Nothing waiting right now.
-      // If the producer is still running, wait a bit and check again.
       if (_producerActive) {
         await sleep(300);
         continue;
       }
-
-      // Producer is done — check once more after a short grace period
-      // in case a task was pushed at the last moment.
       await sleep(500);
       const stillWaiting = queue.some(t => t.status === 'waiting');
       if (!stillWaiting) break;
@@ -982,11 +1141,11 @@ async function startConsumer(apiKey, platform) {
     task.status = 'processing';
     renderQueueThrottled();
 
+    let stopBatch = false;
+
     try {
-      await rateLimiter.wait();
       const json = await extractOneWithRetry(task, apiKey, platform);
 
-      // Extract metadata before storing the clean JSON
       if (json._signatureWarning) {
         task.signatureWarning = json._signatureWarning;
         delete json._signatureWarning;
@@ -1003,7 +1162,11 @@ async function startConsumer(apiKey, platform) {
     } catch (err) {
       console.error(task.file.name, err);
 
-      if (err.invalidImage) {
+      if (err.message && err.message.includes('DAILY_LIMIT_REACHED')) {
+        task.error = 'Daily API limit reached';
+        task.status = 'waiting';   // put it back so it can be resumed later
+        stopBatch = true;
+      } else if (err.invalidImage) {
         task.error = 'Invalid image — not an EBRO Control Calidad form';
         task.status = 'error';
         task.invalidImage = true;
@@ -1013,9 +1176,12 @@ async function startConsumer(apiKey, platform) {
       }
     }
 
-    // ──────────────────────────────────────────────────────────
-    //  Move the file to readed/ or error/ (Local Folder mode only)
-    // ──────────────────────────────────────────────────────────
+    if (stopBatch) {
+      showStatus('🛑 Daily API limit reached. Batch stopped. Resume tomorrow.', 'error');
+      break;
+    }
+
+    // Move file if applicable
     if (inputMethod === 'folder' && task.localHandle && task.localName) {
       try {
         const targetHandle = task.status === 'success'
@@ -1031,32 +1197,23 @@ async function startConsumer(apiKey, platform) {
       }
     }
 
-    // Live update queue
     renderQueueThrottled();
 
-    // Live update queue
-    renderQueueThrottled();
-
-    // Live update result table (only if we have any success)
     const successTasks = queue.filter(t => t.status === 'success' && t.json);
     if (successTasks.length) {
       renderResultTable(successTasks);
       resultSection.style.display = 'block';
     }
 
-    // Update summary + progress bar (throttled to avoid excessive DOM writes)
     const now = Date.now();
     if (now - lastProgressUpdate > 500) {
       lastProgressUpdate = now;
 
-      const totalTracked = queue.filter(t =>
-        t.status === 'success' || t.status === 'error' || t.status === 'processing'
-      ).length;
       const processed = queue.filter(t =>
         t.status === 'success' || t.status === 'error'
       ).length;
 
-      if (totalTracked > 0) {
+      if (queue.length > 0) {
         progressBar.style.width = `${Math.round((processed / queue.length) * 100)}%`;
       }
 
@@ -1076,18 +1233,18 @@ async function startConsumer(apiKey, platform) {
   console.log('[consumer] stopped');
 
   await releaseWakeLock();
-  
+
   if (platform === 'deepseek') fetchDeepSeekBalance();
 
-  // Final render
   renderQueue();
   progressBar.style.width = '100%';
 
   const successCount = queue.filter(t => t.status === 'success').length;
   const failedCount = queue.filter(t => t.status === 'error').length;
+  const waitingCount = queue.filter(t => t.status === 'waiting').length;
 
   summaryEl.style.display = 'block';
-  summaryEl.innerHTML = `✅ Succeeded: ${successCount} · ❌ Failed: ${failedCount} · Total: ${queue.length}`;
+  summaryEl.innerHTML = `✅ Succeeded: ${successCount} · ❌ Failed: ${failedCount} · ⏳ Waiting: ${waitingCount} · Total: ${queue.length}`;
 
   const successTasks = queue.filter(t => t.status === 'success' && t.json);
   if (successTasks.length) {
@@ -1095,9 +1252,12 @@ async function startConsumer(apiKey, platform) {
     resultSection.style.display = 'block';
     showStatus(
       `🎉 Done. Succeeded: ${successCount}, Failed: ${failedCount}.` +
+      (waitingCount ? ` ${waitingCount} still waiting (daily limit).` : '') +
       (failedCount ? ' Use "Retry Failed" or per-row Retry to try again.' : ''),
       successCount ? 'success' : 'error'
     );
+  } else if (waitingCount > 0) {
+    showStatus(`⏸️ Paused. ${waitingCount} task(s) waiting — daily limit reached.`, 'warning');
   } else {
     showStatus('❌ All failed. Check your API Key or network.', 'error');
   }
@@ -1413,8 +1573,12 @@ async function extractOneWithRetry(task, apiKey, platform) {
     } catch (err) {
       lastErr = err;
       const msg = String(err.message || '').toLowerCase();
-      // Invalid images should NOT be retried — they will always fail
+
+      // Invalid images should NOT be retried
       if (err.invalidImage) throw err;
+
+      // Daily limit: do not retry — the consumer will stop the batch
+      if (err.message && err.message.includes('DAILY_LIMIT_REACHED')) throw err;
 
       const isTransient = err.transient === true ||
         /high demand|overloaded|temporarily|try again|rate limit|503|502|504|429|insufficient/i.test(msg);
@@ -1451,6 +1615,12 @@ async function callGemini({ base64, mimeType, prompt, apiKey }) {
   const cfg = PLATFORMS.gemini;
   const modelId = getCurrentGeminiModel();
   const url = `${cfg.endpoint(modelId)}?key=${apiKey}`;
+
+  // Estimate tokens: image (~2500) + prompt (~1500) + output buffer (~1000)
+  const estimatedTokens = 5000;
+
+  // Wait for a rate-limit slot (throws DAILY_LIMIT_REACHED if RPD exceeded)
+  await smartRateLimiter.wait(estimatedTokens);
 
   let response;
   try {
@@ -1504,9 +1674,7 @@ async function callGemini({ base64, mimeType, prompt, apiKey }) {
     throw e;
   }
 
-  // ──────────────────────────────────────────────────────────
-  //  Check validity BEFORE postProcess strips _validity
-  // ──────────────────────────────────────────────────────────
+  // Check validity BEFORE postProcess strips _validity
   if (parsed.header && parsed.header._validity === 'invalid') {
     const e = new Error('INVALID_IMAGE');
     e.invalidImage = true;
@@ -3114,7 +3282,7 @@ async function processLocalBatch() {
   }
 
   const platform = getCurrentPlatform();
-  _producerActive = false;   // manual trigger: no producer running
+  _producerActive = false;
   startConsumer(apiKey, platform);
 }
 /**
