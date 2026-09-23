@@ -107,7 +107,7 @@ const FIELD_SCHEMA = {
   section_1: {
     codigo_conjunto: {
       type: 'string',
-      description: 'The handwritten value inside the box labeled "CÓDIGO CONJUNTO", in the first row of the form body directly under the colored header band. This is a MATERIAL CODE that follows specific patterns. RULES: (1) REMOVE ALL EMPTY SPACES — if the handwritten code contains gaps between character groups, join them into a single string. Example: "60 200 57 84 AAAUH" → "602005784AAAUH". (2) The code follows these PATTERNS: · Pattern A: 8 digits + "AA" (e.g. 555001255AA, 609000503AA). The AA suffix is almost always two letter As — NOT "AD". · Pattern B: 8 digits + "AAA" + 2 letters (e.g. 403013064AAABE). The AAA is three letter As in a row — NOT "DAA". · Pattern C: numeric prefix + "-" + longer body (e.g. 60-3611061AB, 368-6107118). · Pattern D: letter prefix + digits (e.g. J686107113). (3) COMMON MISREADINGS TO AVOID: · The digit "0" must NOT be read as the letter "O" inside a numeric body. · The digit "1" must NOT be read as "I" or "l". · The letter "A" must NOT be read as "D" or "4". · The digit "4" must NOT be read as "A". (4) MULTIPLE CODES ON ONE LINE: sometimes the operator writes TWO OR MORE material codes on the same line, separated by "/", "-", "|", "+", or "&". Return ALL codes joined by the original separator, without spaces. Example: "609000503AA / 609000504BB" → "609000503AA/609000504BB". (5) Do NOT read PRINTED form lines or grid borders as part of the code. ONLY read the BLUE or BLACK handwriting.'
+      description: 'The handwritten value inside the box labeled "CÓDIGO CONJUNTO", in the first row of the form body directly under the colored header band. This is a MATERIAL CODE. RULES: (1) REMOVE ALL EMPTY SPACES — join all character groups into a single string. Example: "60 200 57 84 AAAUH" → "602005784AAAUH". (2) TYPICAL LENGTH: material codes are usually 12-14 characters long. If your reading is shorter than 11 characters, you are probably DROPPING characters — re-check the image carefully. (3) COMMON PATTERNS: · Pattern A: 8-9 digits + "AA" + optional suffix (e.g. 555001255AA, 609000503AA). · Pattern B: 8-9 digits + "AAA" + 2 letters (e.g. 403018592AAAGY, 403013064AAABE). In this pattern there are usually FOUR or FIVE consecutive letter-A characters in the middle (AAA or AAAA), followed by 1-2 final letters. · Pattern C: numeric prefix + "-" + longer body (e.g. 60-3611061AB). · Pattern D: letter prefix + digits (e.g. J686107113). (4) CHARACTER DISAMBIGUATION — READ THE STROKE SHAPE, NOT THE FAMILIAR PATTERN: · "4" vs "6" — CRITICAL: a handwritten "4" has a SHARP ANGLE with a vertical stroke and a horizontal cross-bar. A handwritten "6" has a CLOSED LOOP at the bottom with a curved top. If the first character of a code looks like a sharp angular shape, it is "4" (not "6"). Material codes almost always START with "4" or a letter prefix — the digit "6" is RARE at the start. · "0" vs "O" — inside a numeric body, it is almost always the digit ZERO. · "1" vs "I" vs "l" — inside a numeric body, it is the digit ONE. · "5" vs "S" — inside a numeric body, it is the digit FIVE. · "8" vs "B" — inside a numeric body, it is the digit EIGHT. · "A" vs "D" — "A" has a triangular peak with a cross-bar; "D" has a rounded right side. When in doubt in a code suffix, it is "A". · "Y" vs "M" — "Y" has TWO diagonal strokes meeting at a single point with a stem below; "M" has TWO VERTICAL strokes connected by two diagonals. Look at whether the strokes are parallel (M) or converging to a point (Y). (5) MULTIPLE CODES ON ONE LINE: sometimes the operator writes TWO OR MORE material codes on the same line, separated by "/", "-", "|", "+", or "&". Return ALL codes joined by the original separator, without spaces. Example: "609000503AA / 609000504BB" → "609000503AA/609000504BB". (6) Do NOT read PRINTED form lines or grid borders as part of the code. ONLY read the BLUE or BLACK handwriting. (7) DO NOT DROP OR DUPLICATE CHARACTERS: count the characters of your reading and compare with what is visibly written. Handwritten codes are often written with uneven spacing between groups — do not assume a group is shorter than it looks.'
     },
     codigo_componente: {
       type: 'string',
@@ -174,7 +174,8 @@ const FORMAT_RULES = {
     test: v => {
       // Remove spaces
       const s = v.trim().replace(/\s+/g, '');
-      if (s.length < 8) return false;
+      // Length check — material codes are 11-20 chars
+      if (s.length < 11 || s.length > 20) return false;
       // Reject hard-invalid special symbols
       if (/[?!@#$%&*()\[\]{}<>"';:`~^|\\]/.test(s)) return false;
       // Must contain at least one digit
@@ -184,15 +185,15 @@ const FORMAT_RULES = {
       const parts = s.split(/[\/|&+]/);
       for (const part of parts) {
         const ok =
-          /^[0-9]{8}AA[A-Z]{0,2}$/i.test(part) ||       // 8 digits + AA or AAA + letters
-          /^[0-9]{6,8}-[0-9A-Z]{6,12}$/i.test(part) ||   // dash pattern
-          /^[A-Z][0-9]{6,12}$/i.test(part) ||            // letter prefix + digits
-          /^[0-9A-Z]{8,20}$/i.test(part);                // lenient fallback
+          /^[0-9]{8,9}AA[A-Z]{0,3}$/i.test(part) ||      // Pattern A/B: 8-9 digits + AA/AAA + optional letters
+          /^[0-9]{6,8}-[0-9A-Z]{6,12}$/i.test(part) ||   // Pattern C: dash pattern
+          /^[A-Z][0-9]{6,12}$/i.test(part) ||            // Pattern D: letter prefix + digits
+          /^[0-9A-Z]{11,20}$/i.test(part);               // lenient fallback
         if (!ok) return false;
       }
       return true;
     },
-    hint: 'Expected a material code (e.g. 555001255AA, 403013064AAABE, 60-3611061AB, J686107113) with no spaces, or multiple codes joined by / - | + &.'
+    hint: 'Expected a material code 11-20 characters long (e.g. 555001255AA, 403018592AAAGY, 60-3611061AB, J686107113) with no spaces, or multiple codes joined by / - | + &.'
   },
   'section_1.codigo_componente': {
     test: v => /[A-Za-z]/.test(v) && v.trim().length >= 4,
@@ -349,36 +350,46 @@ function buildPromptText() {
   lines.push('   In that case, return ALL codes joined by the original separator, WITHOUT any spaces.');
   lines.push('   Example: "609000503AA / 609000504BB" → "609000503AA/609000504BB".');
   lines.push('   Do NOT split or drop any code.');
+  lines.push('   DO NOT DROP CHARACTERS: after reading, count the characters and compare with what is visibly written.');
+  lines.push('   Handwritten codes are often written with uneven spacing between groups — do NOT assume a group is shorter than it looks.');
   lines.push('');
   lines.push('5d. MATERIAL CODE GRAMMAR — codigo_conjunto and codigo_rechaz:');
   lines.push('   The material codes follow SPECIFIC PATTERNS. Use them to double-check your reading:');
   lines.push('');
-  lines.push('   PATTERN A (numeric-body + AA-suffix): 8 digits followed by "AA".');
+  lines.push('   TYPICAL LENGTH: material codes are usually 12 to 14 characters long.');
+  lines.push('   If your reading has fewer than 11 characters, you are probably DROPPING characters — re-check the image.');
+  lines.push('');
+  lines.push('   PATTERN A (numeric-body + AA-suffix): 8-9 digits followed by "AA".');
   lines.push('     Examples: 555001255AA, 609000503AA, 403013061AA.');
   lines.push('     The "AA" suffix is almost ALWAYS two letter As — NOT "AD", NOT "AB", NOT "AE".');
-  lines.push('     If you read "...AD" or "...AO" or "...AE", it is almost certainly "...AA" — check the stroke carefully.');
-  lines.push('     An "A" has a triangular peak and a horizontal cross-bar. A "D" has a rounded right side with no cross-bar.');
   lines.push('');
-  lines.push('   PATTERN B (numeric-body + AAA-suffix + 2 letters): 8 digits followed by "AAA" followed by 2 letters.');
-  lines.push('     Examples: 403013064AAABE, 555001255AAABF, 610000123AAACD.');
-  lines.push('     The "AAA" is three letter As in a row — NOT "DAA", NOT "AAO", NOT "AAB".');
-  lines.push('     If you read "DAABE" or "AAOBE", it is almost certainly "AAABE" — the middle character is an "A", not a "D".');
+  lines.push('   PATTERN B (numeric-body + AAA-suffix + letters): 8-9 digits followed by THREE OR FOUR "A" characters, then 1-2 final letters.');
+  lines.push('     Examples: 403018592AAAGY, 403013064AAABE, 555001255AAABF.');
+  lines.push('     IMPORTANT: this pattern frequently has FOUR consecutive A characters ("AAAA"), not three.');
+  lines.push('     Do NOT collapse "AAAA" into "AAA". Count the visible A strokes carefully.');
+  lines.push('     The "AAA"/"AAAA" is a sequence of letter As — NOT "DAA", NOT "AAO", NOT "AAB".');
+  lines.push('     The FINAL letter(s) after the A-block are usually Y, M, E, F, or similar — read them carefully.');
   lines.push('');
-  lines.push('   PATTERN C (with dash prefix): some codes have a numeric prefix followed by a dash and then a longer body.');
+  lines.push('   PATTERN C (with dash prefix): numeric prefix + dash + longer body.');
   lines.push('     Examples: 60-3611061AB, 368-6107118.');
   lines.push('     Keep the dash exactly as written.');
   lines.push('');
-  lines.push('   PATTERN D (letter prefix): some codes start with a letter.');
+  lines.push('   PATTERN D (letter prefix): starts with a letter followed by digits.');
   lines.push('     Examples: J686107113.');
   lines.push('     Keep the leading letter.');
   lines.push('');
-  lines.push('   CRITICAL — COMMON MISREADINGS TO AVOID:');
-  lines.push('     · "0" (zero) vs "O" (letter O): in a numeric body, it is almost always a ZERO. Only at the START of a code (Pattern D) or as part of an AA-suffix anomaly would it be a letter O.');
-  lines.push('     · "1" (one) vs "I" (capital i) vs "l" (lowercase L): in a numeric body, it is a ONE.');
-  lines.push('     · "5" (five) vs "S": in a numeric body, it is a FIVE.');
-  lines.push('     · "8" (eight) vs "B": in a numeric body, it is an EIGHT.');
-  lines.push('     · "A" (letter) vs "4" (four): "A" has a flat base and a triangular peak; "4" has a vertical stroke and a horizontal cross-bar. They are DIFFERENT.');
-  lines.push('     · "A" vs "D": "A" is triangular with a cross-bar; "D" is rounded on the right with a straight left edge. If the middle of a code looks like "D", verify whether the right side has a cross-bar inside (that would make it an "A").');
+  lines.push('   CRITICAL MISREADINGS TO AVOID — READ THE STROKE SHAPE, NOT THE PATTERN:');
+  lines.push('     · "4" vs "6": a handwritten "4" has a SHARP ANGLE with a vertical stroke and a horizontal cross-bar. A handwritten "6" has a CLOSED LOOP at the bottom with a curved top.');
+  lines.push('       At the START of a material code, the first character is almost always "4" (or a letter prefix). The digit "6" is RARE at the start.');
+  lines.push('       If you are tempted to read "6" at the start of a code, double-check whether the shape actually has a sharp angular stroke — if so, it is "4".');
+  lines.push('     · "Y" vs "M": "Y" has TWO DIAGONAL strokes converging to a single point, with a stem below. "M" has TWO VERTICAL strokes connected by TWO diagonals, with parallel sides.');
+  lines.push('       If the strokes converge to a single point, it is "Y". If they are parallel at the bottom, it is "M".');
+  lines.push('     · "0" (zero) vs "O" (letter O): inside a numeric body, it is almost always a ZERO.');
+  lines.push('     · "1" (one) vs "I" vs "l": inside a numeric body, it is a ONE.');
+  lines.push('     · "5" (five) vs "S": inside a numeric body, it is a FIVE.');
+  lines.push('     · "8" (eight) vs "B": inside a numeric body, it is an EIGHT.');
+  lines.push('     · "A" (letter) vs "4" (four): "A" has a flat base and a triangular peak; "4" has a vertical stroke and a horizontal cross-bar.');
+  lines.push('     · "A" vs "D": "A" is triangular with a cross-bar; "D" is rounded on the right with a straight left edge.');
   lines.push('');
   lines.push('6. POSITIONAL ANCHORS (use these to locate each field):');
   lines.push('   - motivo_rechace:   LOWER-LEFT area, under the label "MOTIVO RECHACE". Value is a KNOWN CODE or a BRIEF DESCRIPTION. Known codes: 2276, 2272, 2250, 2213, 2210, 22F0, 2263, 22P1, 22B1, 221R, 221K, 221P, 221L, 221M, 221N, 6100.');
@@ -388,6 +399,7 @@ function buildPromptText() {
   lines.push('   - cantidad:         MIDDLE-RIGHT, box labeled "CANTIDAD". The value may include a "+" or "-" between numbers, e.g. "1+1", "2+3". This is NORMAL — return the full expression AS WRITTEN, do NOT collapse it into "11".');
   lines.push('   - codigo_rechaz:    MIDDLE-LEFT, small box labeled "CÓDIGO RECHAZ"');
   lines.push('   - origen_area_zona: LEFT-MIDDLE, sourced from ORIGEN (AREA+ZONA) or ZONA O LÍNEA or DETECTADO. See rule 5b.');
+  lines.push('   - codigo_conjunto:  TOP-LEFT of the form body, first row under the colored header band. Usually a material code of 12-14 characters. Remove all spaces. See rules 5c and 5d.');
   lines.push('   These boxes are in DIFFERENT physical locations. A value written in one box cannot appear in another.');
   lines.push('');
   lines.push('7. Each field description below tells you exactly where its label is and what its value should look like.');
