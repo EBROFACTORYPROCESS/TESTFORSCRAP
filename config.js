@@ -105,19 +105,44 @@ const FIELD_SCHEMA = {
     }
   },
   section_1: {
-    codigo_conjunto: { type: 'string', description: 'The handwritten value inside the box labeled "CÓDIGO CONJUNTO", in the first row of the form body directly under the colored header band. It is usually a LONG alphanumeric code (typically 8-20 characters) that may start with any letter or digit. It may contain spaces and the characters / - . but should NOT contain special symbols like ? ! @ # $ % & * ( ) + = [ ] { } < >. Example: "40301YS92 AAAG4", "C4071823B", "601234X/2".'
+    codigo_conjunto: {
+      type: 'string',
+      description: 'The handwritten value inside the box labeled "CÓDIGO CONJUNTO", in the first row of the form body directly under the colored header band. It is usually a LONG alphanumeric code (typically 8-20 characters). RULES: (1) REMOVE ALL EMPTY SPACES — if the handwritten code contains gaps between character groups, join them into a single string. Example: "60 200 57 84 AAAUH" → "602005784AAAUH". (2) The code may contain the characters / - . as internal separators — keep them. (3) SPECIAL CASE — MULTIPLE CODES ON ONE LINE: sometimes the operator writes TWO OR MORE material codes on the same line, separated by a special character such as "/", "-", "|", "+", or "&". In that case, return ALL codes joined by the original separator, but WITHOUT any spaces. Example: "609000503AA / 609000504BB" → "609000503AA/609000504BB". Example: "609000503AA-609000504BB" → "609000503AA-609000504BB". Do NOT split or drop any code. (4) Do NOT include special symbols like ? ! @ # $ % * ( ) = [ ] { } < >. Return the exact alphanumeric string.'
     },
-    codigo_componente: { type: 'string', description: 'The handwritten value inside the box labeled "CÓDIGO COMPONENTE". Usually contains "/" separators, e.g. "Pilar B/Sup/Der".' },
-    codigo_rechaz: { type: 'string', description: 'The handwritten value inside the small box labeled "CÓDIGO RECHAZ", on the LEFT side below "CÓDIGO COMPONENTE". This is a SHORT alphanumeric code of 3-5 characters. It commonly contains BOTH digits AND letters, e.g. "221M", "2216", "22M4", "A104", "2214". IMPORTANT: handwritten letters are easily confused with digits — for example "M" can look like "04", and "O" can look like "0". Read the STROKE SHAPE carefully: the letter "M" has two vertical strokes connected by diagonal strokes; it is NOT two separate digits. If the value looks like "22104" but the last two characters are clearly a handwritten "M", return "221M". Return the exact alphanumeric string as written (letters + digits), preserving the original order.'
+    codigo_componente: {
+      type: 'string',
+      description: 'The handwritten value inside the box labeled "CÓDIGO COMPONENTE". Usually contains "/" separators, e.g. "Pilar B/Sup/Der".'
     },
-    cantidad: { type: 'string', description: 'A number handwritten INSIDE the box labeled "CANTIDAD". It is often followed by a horizontal PRINTED LINE (a guard line that prevents someone from adding extra digits later, e.g. converting "1" into "10" or "100"). Do NOT include this line or any trailing dashes in the value — only the digits. Examples: if you see "1" followed by a long line, return "1". If you see "2" followed by a line, return "2". The value is normally 1 to 3 digits.' },
-    origen_area_zona: { type: 'string', description: 'A location code written in the LEFT-MIDDLE of the form. This field is composed of TWO adjacent sub-boxes under the header "ORIGEN": the LEFT sub-box is labeled "AREA" and the RIGHT sub-box is labeled "ZONA". Both sub-boxes usually contain a short code, e.g. AREA="M1" and ZONA="M3". Concatenate them into a single value WITHOUT a space or separator: "M1"+"M3" → "M1M3". If only one sub-box is filled, return only that value (e.g. "M1" or "M3"). If both are empty, also check the "ZONA O LÍNEA" box elsewhere on the form and use that value. Return null only if all three boxes are empty.' }
+    codigo_rechaz: {
+      type: 'string',
+      description: 'The handwritten value inside the small box labeled "CÓDIGO RECHAZ", on the LEFT side below "CÓDIGO COMPONENTE". This is a SHORT alphanumeric code of 3-5 characters. It commonly contains BOTH digits AND letters, e.g. "221M", "2216", "22M4", "A104", "2214". IMPORTANT: handwritten letters are easily confused with digits — for example "M" can look like "04", and "O" can look like "0". Read the STROKE SHAPE carefully: the letter "M" has two vertical strokes connected by diagonal strokes; it is NOT two separate digits. If the value looks like "22104" but the last two characters are clearly a handwritten "M", return "221M". Return the exact alphanumeric string as written (letters + digits), preserving the original order.'
+    },
+    cantidad: {
+      type: 'string',
+      description: 'A number handwritten INSIDE the box labeled "CANTIDAD". It is often followed by a horizontal PRINTED LINE (a guard line that prevents someone from adding extra digits later, e.g. converting "1" into "10" or "100"). Do NOT include this line or any trailing dashes in the value — only the digits. SPECIAL CASE: the operator may write a math expression using "+" or "-" between numbers, for example "1+1", "2+3", or "1+1+1". This is NORMAL — return the full expression exactly as written, including the "+" or "-" signs. Do NOT collapse "1+1" into "11", and do NOT compute the result. Return the raw string exactly as written on the form.'
+    },
+    origen_area_zona: {
+      type: 'string',
+      description: 'A location code written in the LEFT-MIDDLE of the form. This field can be sourced from THREE different boxes, in this priority order: (1) FIRST, check the box under the header "ORIGEN" — it has TWO adjacent sub-boxes labeled "AREA" (left) and "ZONA" (right). If both are filled, concatenate them with NO separator, e.g. AREA="M1", ZONA="M3" → "M1M3". If only one is filled, return just that value. (2) SECOND, if the ORIGEN boxes are empty, check the box labeled "ZONA O LÍNEA" located in the LOWER-LEFT of the form, just above the FECHA box. This box is often handwritten with a short code like "LF", "M2", "15A", "221R". (3) THIRD, if the ZONA O LÍNEA box is also empty, check the small box labeled "DETECTADO" (located immediately to the right of ZONA O LÍNEA). Return its value. Return null only if ALL of these boxes are empty.'
+    }
   },
   section_2: {
-    motivo_rechace: { type: 'string', description: 'A rejection reason handwritten INSIDE the box labeled "MOTIVO RECHACE", in the LOWER-LEFT of the form. It is typically a short phrase describing the defect, e.g. "DESCASCARADA CON GOLPE DE CAJAS", "RAYADO", "GOLPE". It is NEVER a date, NEVER an operator ID, NEVER a 4-digit code. The text must be physically written INSIDE the MOTIVO RECHACE box — do NOT spread it to other fields.' },
-    fecha: { type: 'string', description: 'A DATE handwritten INSIDE the small box labeled "FECHA" at the BOTTOM-LEFT of the form. The box is small and bordered by printed lines. A valid value MUST look like a date: "DD/MM/YY", "D/M/YY", "D-M-YY", "DD-MM-YYYY" (e.g. "22/4/26", "15-9-26"). If the box contains anything that is NOT a date — for example a word, a defect description, or an operator ID — return null. Do NOT invent a value. Do NOT copy the date into the OPERARIO box below.' },
-    observaciones: { type: 'string', description: 'Free-text comments handwritten INSIDE the wide box labeled "OBSERVACIONES" at the BOTTOM-CENTER of the form. This box is OFTEN EMPTY. If empty, return null. The value must be physically written INSIDE the OBSERVACIONES box — do NOT copy text from MOTIVO RECHACE, FECHA, or OPERARIO.' },
-    operario: { type: 'string', description: 'A short OPERATOR ID handwritten INSIDE the small box labeled "OPERARIO". This box sits DIRECTLY BELOW the "FECHA" box at the BOTTOM-LEFT of the form. Valid values are 3 or 4 digits (e.g. "897", "1234"). IMPORTANT: This box is VERY OFTEN EMPTY. If empty, return null. If the only handwriting in that area is the date (in the FECHA box above), do NOT copy it down — operario must stay null. It is NEVER a date, NEVER a defect description, NEVER a word.' }
+    motivo_rechace: {
+      type: 'string',
+      description: 'The rejection reason written INSIDE the box labeled "MOTIVO RECHACE", in the LOWER-LEFT of the form. The value is EITHER: (a) a KNOWN REJECT CODE from the list below, OR (b) a short brief description of the defect, e.g. "DESCASCARADA CON GOLPE DE CAJAS", "RAYADO", "GOLPE", "ROTO". The known codes are: 2276, 2272, 2250, 2213, 2210, 22F0, 2263, 22P1, 22B1, 221R, 221K, 221P, 221L, 221M, 221N, 6100. If the value matches one of these codes EXACTLY (including letter+digit mixes like "221M" or "22P1"), return the code as-is. If the value is a description instead of a code, return the description text as written. NEVER return a date, an operator ID, or a generic word like "FECHA". The value must be physically written INSIDE the MOTIVO RECHACE box.'
+    },
+    fecha: {
+      type: 'string',
+      description: 'A DATE handwritten INSIDE the small box labeled "FECHA" at the BOTTOM-LEFT of the form. The box is small and bordered by printed lines. A valid value MUST look like a date: "DD/MM/YY", "D/M/YY", "D-M-YY", "DD-MM-YYYY" (e.g. "22/4/26", "15-9-26"). If the box contains anything that is NOT a date — for example a word, a defect description, or an operator ID — return null. Do NOT invent a value. Do NOT copy the date into the OPERARIO box below.'
+    },
+    observaciones: {
+      type: 'string',
+      description: 'Free-text comments handwritten INSIDE the wide box labeled "OBSERVACIONES" at the BOTTOM-CENTER of the form. This box is OFTEN EMPTY. If empty, return null. The value must be physically written INSIDE the OBSERVACIONES box — do NOT copy text from MOTIVO RECHACE, FECHA, or OPERARIO.'
+    },
+    operario: {
+      type: 'string',
+      description: 'A short OPERATOR ID handwritten INSIDE the small box labeled "OPERARIO". This box sits DIRECTLY BELOW the "FECHA" box at the BOTTOM-LEFT of the form. Valid values are 3 or 4 digits (e.g. "897", "1234"). IMPORTANT: This box is VERY OFTEN EMPTY. If empty, return null. If the only handwriting in that area is the date (in the FECHA box above), do NOT copy it down — operario must stay null. It is NEVER a date, NEVER a defect description, NEVER a word.'
+    }
   },
   signatures: {
     inspector: {
@@ -147,28 +172,82 @@ const FORMAT_RULES = {
   },
   'section_1.codigo_conjunto': {
     test: v => {
-      const s = v.trim();
+      // Normalize: remove all spaces
+      const s = v.trim().replace(/\s+/g, '');
       if (s.length < 8) return false;
+      // Reject special symbols (but allow / - . as separators)
       if (/[?!@#$%&*()=+\[\]{}<>"';:`~^|\\]/.test(s)) return false;
+      // Must contain at least one digit
       if (!/\d/.test(s)) return false;
       return true;
     },
-    hint: 'Expected a long alphanumeric code (letters, digits, spaces, / - .). Must not contain special symbols.'
+    hint: 'Expected a long alphanumeric code (no spaces, may contain / - . as separators), or multiple codes joined by a separator.'
   },
-  'section_1.codigo_componente': { test: v => /[A-Za-z]/.test(v) && v.trim().length >= 4, hint: 'Expected a text description like "Pilar B/Sup/Der"' },
+  'section_1.codigo_componente': {
+    test: v => /[A-Za-z]/.test(v) && v.trim().length >= 4,
+    hint: 'Expected a text description like "Pilar B/Sup/Der"'
+  },
   'section_1.codigo_rechaz': {
     test: v => /^[A-Z0-9]{3,5}$/i.test(v.trim().replace(/\s+/g, '')),
     hint: 'Expected a 3-5 character alphanumeric code (digits and/or letters), e.g. "2216", "221M", "A104".'
   },
-  'section_1.cantidad': { test: v => /^[0-9]{1,3}$/.test(v.trim()), hint: 'Expected a small number like "2"' },
-  'section_1.origen_area_zona': { test: v => /^[A-Z0-9][A-Z0-9\s\-]{1,11}$/i.test(v.trim()), hint: 'Expected a short alphanumeric code like "M1M3" or "M1" or "15A".' },
-  'section_2.motivo_rechace': { test: v => /^[0-9A-Z]{3,5}$/i.test(v.replace(/\s+/g, '')), hint: 'Expected a 3-5 character rejecting code' },
-  'section_2.fecha': { test: v => /^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}$/.test(v.trim()), hint: 'Expected a date like "22/4/26"' },
-  'section_2.operario': { test: v => /^[0-9]{3,4}$/.test(v.trim()), hint: 'Expected a 3 or 4 digit operator ID' },
-  'section_2.observaciones': { test: v => /[A-Za-zÀ-ÿ]/.test(v) && !/^\d+$/.test(v.trim()), hint: 'Expected a text comment, not a number' },
-  'signatures.inspector': { test: v => /^(Signed|Not Signed)$/i.test(v.trim()), hint: 'Expected "Signed" or "Not Signed"' },
-  'signatures.visto_bueno_calidad': { test: v => /^(Signed|Not Signed)$/i.test(v.trim()), hint: 'Expected "Signed" or "Not Signed"' },
-  'signatures.encargado_linea': { test: v => /^(Signed|Not Signed)$/i.test(v.trim()), hint: 'Expected "Signed" or "Not Signed"' }
+  'section_1.cantidad': {
+    test: v => {
+      const s = v.trim();
+      // Pure number (1-3 digits)
+      if (/^[0-9]{1,3}$/.test(s)) return true;
+      // Math expression with + or - between digits, e.g. "1+1", "2-1", "1+1+1"
+      if (/^[0-9]{1,2}(\s*[\+\-]\s*[0-9]{1,2})+$/.test(s)) return true;
+      return false;
+    },
+    hint: 'Expected a small number like "2", or a math expression like "1+1".'
+  },
+  'section_1.origen_area_zona': {
+    test: v => /^[A-Z0-9][A-Z0-9\s\-]{1,11}$/i.test(v.trim()),
+    hint: 'Expected a short alphanumeric code like "M1M3" or "M1" or "15A".'
+  },
+  'section_2.motivo_rechace': {
+    test: v => {
+      const s = v.trim().toUpperCase();
+
+      // Known reject codes
+      const KNOWN_CODES = [
+        '2276','2272','2250','2213','2210','22F0','2263','22P1','22B1',
+        '221R','221K','221P','221L','221M','221N','6100'
+      ];
+      if (KNOWN_CODES.includes(s.replace(/\s+/g, ''))) return true;
+
+      // Otherwise, allow a brief description (at least 3 characters, contains letters)
+      if (s.length >= 3 && /[A-Z]/i.test(s)) return true;
+
+      return false;
+    },
+    hint: 'Expected a known reject code (e.g. 221M, 22P1, 6100) or a short description like "RAYADO".'
+  },
+  'section_2.fecha': {
+    test: v => /^\d{1,2}[\/\-\.]\d{1,2}[\/\-\.]\d{2,4}$/.test(v.trim()),
+    hint: 'Expected a date like "22/4/26"'
+  },
+  'section_2.operario': {
+    test: v => /^[0-9]{3,4}$/.test(v.trim()),
+    hint: 'Expected a 3 or 4 digit operator ID'
+  },
+  'section_2.observaciones': {
+    test: v => /[A-Za-zÀ-ÿ]/.test(v) && !/^\d+$/.test(v.trim()),
+    hint: 'Expected a text comment, not a number'
+  },
+  'signatures.inspector': {
+    test: v => /^(Signed|Not Signed)$/i.test(v.trim()),
+    hint: 'Expected "Signed" or "Not Signed"'
+  },
+  'signatures.visto_bueno_calidad': {
+    test: v => /^(Signed|Not Signed)$/i.test(v.trim()),
+    hint: 'Expected "Signed" or "Not Signed"'
+  },
+  'signatures.encargado_linea': {
+    test: v => /^(Signed|Not Signed)$/i.test(v.trim()),
+    hint: 'Expected "Signed" or "Not Signed"'
+  }
 };
 
 // ---- Prompt builders ----
@@ -223,18 +302,35 @@ function buildPromptText() {
   lines.push('   Do NOT guess or "spread" a value to fill empty fields.');
   lines.push('   If a box is EMPTY, return null for that field. An empty box is a valid answer.');
   lines.push('');
-  lines.push('5b. TWO-BOX FIELDS (exception to rule 4):');
-  lines.push('   The field "origen_area_zona" is built from TWO adjacent sub-boxes: "AREA" (left) and "ZONA" (right). This is the ONE allowed case where a single output field reads from two printed boxes. Concatenate both values into one string with NO separator.');
-  lines.push('   Example: AREA="M1", ZONA="M3" → origen_area_zona = "M1M3".');
+  lines.push('5b. MULTI-BOX FIELD — origen_area_zona (exception to rule 4):');
+  lines.push('   The field "origen_area_zona" reads from THREE possible boxes, checked in order of priority:');
+  lines.push('     Priority 1 — ORIGEN row: this row has TWO adjacent sub-boxes labeled "AREA" (left) and "ZONA" (right).');
+  lines.push('       If both are filled: concatenate with NO separator. Example: AREA="M1", ZONA="M3" → "M1M3".');
+  lines.push('       If only one is filled: use only that value.');
+  lines.push('     Priority 2 — ZONA O LÍNEA box: located in the LOWER-LEFT of the form, just above the FECHA box.');
+  lines.push('       This box often has a handwritten code like "LF", "M2", "221R", "15A".');
+  lines.push('       Use this value ONLY IF the ORIGEN boxes are both empty.');
+  lines.push('     Priority 3 — DETECTADO box: a small box immediately to the RIGHT of ZONA O LÍNEA.');
+  lines.push('       Use this value ONLY IF both ORIGEN and ZONA O LÍNEA are empty.');
+  lines.push('   Return null only if ALL of the above are empty.');
+  lines.push('   IMPORTANT: Do NOT leave origen_area_zona null if the ZONA O LÍNEA box is filled. It is very common that the ORIGEN boxes are empty but ZONA O LÍNEA has a value.');
+  lines.push('');
+  lines.push('5c. CÓDIGO CONJUNTO — SPACES AND MULTIPLE CODES:');
+  lines.push('   The "codigo_conjunto" field must have ALL EMPTY SPACES REMOVED.');
+  lines.push('   Example: "60 200 57 84 AAAUH" → "602005784AAAUH".');
+  lines.push('   Sometimes the operator writes TWO OR MORE material codes on the SAME LINE, separated by "/", "-", "|", "+", or "&".');
+  lines.push('   In that case, return ALL codes joined by the original separator, WITHOUT any spaces.');
+  lines.push('   Example: "609000503AA / 609000504BB" → "609000503AA/609000504BB".');
+  lines.push('   Do NOT split or drop any code.');
   lines.push('');
   lines.push('6. POSITIONAL ANCHORS (use these to locate each field):');
-  lines.push('   - motivo_rechace:   LOWER-LEFT area, under the label "MOTIVO RECHACE"');
+  lines.push('   - motivo_rechace:   LOWER-LEFT area, under the label "MOTIVO RECHACE". Value is a KNOWN CODE or a BRIEF DESCRIPTION. Known codes: 2276, 2272, 2250, 2213, 2210, 22F0, 2263, 22P1, 22B1, 221R, 221K, 221P, 221L, 221M, 221N, 6100.');
   lines.push('   - fecha:            BOTTOM-LEFT, small box with label "FECHA"');
   lines.push('   - operario:         BOTTOM-LEFT, small box with label "OPERARIO" (DIRECTLY BELOW fecha)');
   lines.push('   - observaciones:    BOTTOM-CENTER, wide box with label "OBSERVACIONES"');
-  lines.push('   - cantidad:         MIDDLE-RIGHT, box labeled "CANTIDAD" (may have a guard line after the number)');
+  lines.push('   - cantidad:         MIDDLE-RIGHT, box labeled "CANTIDAD". The value may include a "+" or "-" between numbers, e.g. "1+1", "2+3". This is NORMAL — return the full expression AS WRITTEN, do NOT collapse it into "11".');
   lines.push('   - codigo_rechaz:    MIDDLE-LEFT, small box labeled "CÓDIGO RECHAZ"');
-  lines.push('   - origen_area_zona: LEFT-MIDDLE, composed of TWO sub-boxes under "ORIGEN": the LEFT one is "AREA" and the RIGHT one is "ZONA". Concatenate them (AREA + ZONA, no separator). Example: AREA="M1", ZONA="M3" → "M1M3". If empty, check the "ZONA O LÍNEA" box elsewhere.');
+  lines.push('   - origen_area_zona: LEFT-MIDDLE, sourced from ORIGEN (AREA+ZONA) or ZONA O LÍNEA or DETECTADO. See rule 5b.');
   lines.push('   These boxes are in DIFFERENT physical locations. A value written in one box cannot appear in another.');
   lines.push('');
   lines.push('7. Each field description below tells you exactly where its label is and what its value should look like.');
