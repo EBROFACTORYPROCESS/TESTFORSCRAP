@@ -20,12 +20,34 @@ const KEY_PARAMETERS = [
   { path: 'section_1.origen_area_zona',   label: 'Origen Área/Zona' },
   { path: 'section_2.fecha',              label: 'Fecha' },
   { path: 'section_2.operario',           label: 'Operario' },
-  { path: 'section_2.motivo_rechace',      label: 'Motivo rechace' },    
+  { path: 'section_2.motivo_rechace',      label: 'Motivo rechace' },    // ============================================================
+//  Configuration: platforms, field schema, format rules
+// ============================================================
+
+const PLATFORM_STORAGE = 'ai_platform';
+const API_KEY_STORAGE_PREFIX = 'api_key_';
+const GEMINI_MODEL_STORAGE = 'gemini_model';
+const PATH_PREFIX_STORAGE = 'source_path_prefix';
+const MAX_SIZE_STORAGE = 'max_image_size';
+const LOCAL_MODE_STORAGE = 'local_mode_enabled';
+const LOCAL_HANDLE_DB = 'ebro_fs_handles';
+const INPUT_METHOD_STORAGE = 'input_method';
+const RATE_LIMITS_OVERRIDE_KEY = 'rate_limits_override';
+
+// ---- Key parameters that must be present for a form to be considered valid ----
+const KEY_PARAMETERS = [
+  { path: 'section_1.codigo_conjunto',    label: 'Código Conjunto' },
+  { path: 'section_1.codigo_rechaz',      label: 'Código Rechazo' },
+  { path: 'section_1.cantidad',           label: 'Cantidad' },
+  { path: 'section_1.codigo_componente',  label: 'Código Componente' },
+  { path: 'section_1.origen_area_zona',   label: 'Origen Área/Zona' },
+  { path: 'section_2.fecha',              label: 'Fecha' },
+  { path: 'section_2.operario',           label: 'Operario' },
+  { path: 'section_2.motivo_rechace',     label: 'Motivo Rechace' },
   { path: 'signatures.encargado_linea',   label: 'Signature Encargado Línea' }
 ];
 
 // Fields that should NEVER be classified as "missing" even when empty.
-// Their emptiness is normal for this form.
 const OPTIONAL_FIELDS = [
   'section_2.observaciones'
 ];
@@ -35,44 +57,46 @@ const HIDDEN_FIELDS = [
   'header.company',
   'header.document_type'
 ];
+
 // ---- AI Platform configs ----
 const PLATFORMS = {
   gemini: {
     name: 'Gemini',
-    // defaultModel is now selected at runtime via the model dropdown.
-    // This fallback is used only if the selector has no stored value.
     defaultModel: 'gemini-3.6-flash',
     endpoint: (model) => `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
     keyHint: 'Get a free key at <a href="https://aistudio.google.com" target="_blank" rel="noopener noreferrer">aistudio.google.com</a>',
     placeholder: 'Paste your Gemini API Key...',
     badgeClass: 'gemini',
-    // Available Gemini models with their known free-tier limits.
-    // The list is used to build the dropdown. Add/remove entries as needed.
     models: [
       {
         id: 'gemini-3.6-flash',
         label: 'Gemini 3.6 Flash',
-        note: 'Free tier: ~5 RPM, ~20 RPD — best quality, very limited daily quota'
+        note: 'Free tier: ~5 RPM, ~20 RPD — best quality, very limited daily quota',
+        limits: { rpm: 5, tpm: 250000, rpd: 20 }
       },
       {
         id: 'gemini-3.5-flash',
         label: 'Gemini 3.5 Flash',
-        note: 'Free tier: ~10 RPM, ~250 RPD — good balance of quality and quota'
+        note: 'Free tier: ~10 RPM, ~250 RPD — good balance of quality and quota',
+        limits: { rpm: 10, tpm: 250000, rpd: 250 }
       },
       {
         id: 'gemini-3.5-flash-lite',
         label: 'Gemini 3.5 Flash-Lite',
-        note: 'Free tier: ~30 RPM, ~500 RPD — fastest, recommended for high-volume batches'
+        note: 'Free tier: ~30 RPM, ~500 RPD — fastest, recommended for high-volume batches',
+        limits: { rpm: 30, tpm: 1000000, rpd: 500 }
       },
       {
         id: 'gemini-3.1-flash-lite',
         label: 'Gemini 3.1 Flash-Lite',
-        note: 'Free tier: ~30 RPM, ~500 RPD — stable fallback, good for fixed-template forms'
+        note: 'Free tier: ~30 RPM, ~500 RPD — stable fallback, good for fixed-template forms',
+        limits: { rpm: 30, tpm: 1000000, rpd: 500 }
       },
       {
         id: 'gemini-3.6-pro',
         label: 'Gemini 3.6 Pro',
-        note: 'Paid tier only — highest quality, no free daily quota'
+        note: 'Paid tier only — highest quality, no free daily quota',
+        limits: { rpm: 60, tpm: 2000000, rpd: 10000 }
       }
     ]
   },
@@ -87,7 +111,6 @@ const PLATFORMS = {
 };
 
 // ---- Field schema (descriptions sent to the AI) ----
-// Loaded from data.json at startup; this is the fallback if fetching fails.
 const FIELD_SCHEMA = {
   header: {
     _validity: {
@@ -105,15 +128,17 @@ const FIELD_SCHEMA = {
   },
   section_1: {
     codigo_conjunto: { type: 'string', description: 'The handwritten value inside the box labeled "CÓDIGO CONJUNTO", in the first row of the form body directly under the colored header band. It is usually a LONG alphanumeric code (typically 8-20 characters) that may start with any letter or digit. It may contain spaces and the characters / - . but should NOT contain special symbols like ? ! @ # $ % & * ( ) + = [ ] { } < >. Example: "40301YS92 AAAG4", "C4071823B", "601234X/2".'
-    },    
+    },
     codigo_componente: { type: 'string', description: 'The handwritten value inside the box labeled "CÓDIGO COMPONENTE". Usually contains "/" separators, e.g. "Pilar B/Sup/Der".' },
-    codigo_rechaz: { type: 'string', description: 'The handwritten value inside the small box labeled "CÓDIGO RECHAZ", on the LEFT side below "CÓDIGO COMPONENTE". This is a SHORT alphanumeric code of 3-5 characters. It commonly contains BOTH digits AND letters, e.g. "221M", "2216", "22M4", "A104", "2214". IMPORTANT: handwritten letters are easily confused with digits — for example "M" can look like "04", and "O" can look like "0". Read the STROKE SHAPE carefully: the letter "M" has two vertical strokes connected by diagonal strokes; it is NOT two separate digits. If the value looks like "22104" but the last two characters are clearly a handwritten "M", return "221M". Return the exact alphanumeric string as written (letters + digits), preserving the original order.'},    cantidad: { type: 'string', description: 'A number handwritten INSIDE the box labeled "CANTIDAD". It is often followed by a horizontal PRINTED LINE (a guard line that prevents someone from adding extra digits later, e.g. converting "1" into "10" or "100"). Do NOT include this line or any trailing dashes in the value — only the digits. Examples: if you see "1" followed by a long line, return "1". If you see "2" followed by a line, return "2". The value is normally 1 to 3 digits.' },
+    codigo_rechaz: { type: 'string', description: 'The handwritten value inside the small box labeled "CÓDIGO RECHAZ", on the LEFT side below "CÓDIGO COMPONENTE". This is a SHORT alphanumeric code of 3-5 characters. It commonly contains BOTH digits AND letters, e.g. "221M", "2216", "22M4", "A104", "2214". IMPORTANT: handwritten letters are easily confused with digits — for example "M" can look like "04", and "O" can look like "0". Read the STROKE SHAPE carefully: the letter "M" has two vertical strokes connected by diagonal strokes; it is NOT two separate digits. If the value looks like "22104" but the last two characters are clearly a handwritten "M", return "221M". Return the exact alphanumeric string as written (letters + digits), preserving the original order.'
+    },
+    cantidad: { type: 'string', description: 'A number handwritten INSIDE the box labeled "CANTIDAD". It is often followed by a horizontal PRINTED LINE (a guard line that prevents someone from adding extra digits later, e.g. converting "1" into "10" or "100"). Do NOT include this line or any trailing dashes in the value — only the digits. Examples: if you see "1" followed by a long line, return "1". If you see "2" followed by a line, return "2". The value is normally 1 to 3 digits.' },
     origen_area_zona: { type: 'string', description: 'A location code written in the LEFT-MIDDLE of the form. This field is composed of TWO adjacent sub-boxes under the header "ORIGEN": the LEFT sub-box is labeled "AREA" and the RIGHT sub-box is labeled "ZONA". Both sub-boxes usually contain a short code, e.g. AREA="M1" and ZONA="M3". Concatenate them into a single value WITHOUT a space or separator: "M1"+"M3" → "M1M3". If only one sub-box is filled, return only that value (e.g. "M1" or "M3"). If both are empty, also check the "ZONA O LÍNEA" box elsewhere on the form and use that value. Return null only if all three boxes are empty.' }
   },
   section_2: {
-    motivo_rechace: { type: 'string', description:  'A rejection reason handwritten INSIDE the box labeled "MOTIVO RECHACE", in the LOWER-LEFT of the form. It is typically a short phrase describing the defect, e.g. "DESCASCARADA CON GOLPE DE CAJAS", "RAYADO", "GOLPE". It is NEVER a date, NEVER an operator ID, NEVER a 4-digit code. The text must be physically written INSIDE the MOTIVO RECHACE box — do NOT spread it to other fields.' },
-    fecha: { type: 'string', description: 'A DATE handwritten INSIDE the small box labeled "FECHA" at the BOTTOM-LEFT of the form. The box is small and bordered by printed lines. A valid value MUST look like a date: "DD/MM/YY", "D/M/YY", "D-M-YY", "DD-MM-YYYY" (e.g. "22/4/26", "15-9-26"). If the box contains anything that is NOT a date — for example a word, a defect description, or an operator ID — return null. Do NOT invent a value. Do NOT copy the date into the OPERARIO box below.'},
-    observaciones: { type: 'string', description: 'Free-text comments handwritten INSIDE the wide box labeled "OBSERVACIONES" at the BOTTOM-CENTER of the form. This box is OFTEN EMPTY. If empty, return null. The value must be physically written INSIDE the OBSERVACIONES box — do NOT copy text from MOTIVO RECHACE, FECHA, or OPERARIO.'},
+    motivo_rechace: { type: 'string', description: 'A rejection reason handwritten INSIDE the box labeled "MOTIVO RECHACE", in the LOWER-LEFT of the form. It is typically a short phrase describing the defect, e.g. "DESCASCARADA CON GOLPE DE CAJAS", "RAYADO", "GOLPE". It is NEVER a date, NEVER an operator ID, NEVER a 4-digit code. The text must be physically written INSIDE the MOTIVO RECHACE box — do NOT spread it to other fields.' },
+    fecha: { type: 'string', description: 'A DATE handwritten INSIDE the small box labeled "FECHA" at the BOTTOM-LEFT of the form. The box is small and bordered by printed lines. A valid value MUST look like a date: "DD/MM/YY", "D/M/YY", "D-M-YY", "DD-MM-YYYY" (e.g. "22/4/26", "15-9-26"). If the box contains anything that is NOT a date — for example a word, a defect description, or an operator ID — return null. Do NOT invent a value. Do NOT copy the date into the OPERARIO box below.' },
+    observaciones: { type: 'string', description: 'Free-text comments handwritten INSIDE the wide box labeled "OBSERVACIONES" at the BOTTOM-CENTER of the form. This box is OFTEN EMPTY. If empty, return null. The value must be physically written INSIDE the OBSERVACIONES box — do NOT copy text from MOTIVO RECHACE, FECHA, or OPERARIO.' },
     operario: { type: 'string', description: 'A short OPERATOR ID handwritten INSIDE the small box labeled "OPERARIO". This box sits DIRECTLY BELOW the "FECHA" box at the BOTTOM-LEFT of the form. Valid values are 3 or 4 digits (e.g. "897", "1234"). IMPORTANT: This box is VERY OFTEN EMPTY. If empty, return null. If the only handwriting in that area is the date (in the FECHA box above), do NOT copy it down — operario must stay null. It is NEVER a date, NEVER a defect description, NEVER a word.' }
   },
   signatures: {
@@ -137,15 +162,12 @@ const FORMAT_RULES = {
   'header._validity': {
     test: v => /^(valid|invalid)$/i.test(v.trim()),
     hint: 'Expected "valid" or "invalid"'
-  },  
+  },
   'header.ticket_category': {
     test: v => /^(Process Scrap Parts|Supplier Claim Parts)$/i.test(v.trim()),
     hint: 'Expected "Process Scrap Parts" or "Supplier Claim Parts"'
   },
   'section_1.codigo_conjunto': {
-    // Long alphanumeric code. May start with any character (letter or digit).
-    // Must NOT contain special symbols like ? ! @ # $ % & * ( ) = + [ ] { } etc.
-    // Allowed: letters A-Z, digits 0-9, space, and the separators / - .
     test: v => {
       const s = v.trim();
       if (s.length < 8) return false;
@@ -202,7 +224,7 @@ function buildPromptText() {
   lines.push('   - ORANGE header band → ticket_category = "Supplier Claim Parts"');
   lines.push('   Return that exact string in header.ticket_category.');
   lines.push('');
-   lines.push('4. ANTI-DUPLICATION RULE (MANDATORY):');
+  lines.push('4. ANTI-DUPLICATION RULE (MANDATORY):');
   lines.push('   A single piece of handwritten text can only belong to ONE field. It can NEVER appear in two or more fields.');
   lines.push('   Before returning the JSON, perform this verification step:');
   lines.push('     a) Build a list of all non-null values.');
@@ -216,16 +238,6 @@ function buildPromptText() {
   lines.push('   Correct output:');
   lines.push('     fecha:          "15-9-26"');
   lines.push('     operario:       null         ← the OPERARIO box is empty');
-  lines.push('   ');
-  lines.push('   Another example — this is WRONG:');
-  lines.push('     motivo_rechace: "DESCASCARADA CON GOLPE DE CAJAS"');
-  lines.push('     observaciones:  "DESCASCARADA CON GOLPE DE CAJAS"   ← WRONG');
-  lines.push('     operario:       "DESCASCARADA CON GOLPE DE CAJAS"   ← WRONG');
-  lines.push('   ');
-  lines.push('   Correct output:');
-  lines.push('     motivo_rechace: "DESCASCARADA CON GOLPE DE CAJAS"');
-  lines.push('     observaciones:  null');
-  lines.push('     operario:       null');
   lines.push('');
   lines.push('5. STRICT FIELD-BOX READING:');
   lines.push('   Each value is written INSIDE a specific printed box on the form.');
