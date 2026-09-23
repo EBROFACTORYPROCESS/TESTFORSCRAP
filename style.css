@@ -32,7 +32,7 @@ h1 { font-size: 22px; margin-bottom: 4px; }
 }
 
 /* ============================================================
-   Two-column layout — FIXED HEIGHT, both columns fill it
+   Two-column layout — FIXED HEIGHT
    ============================================================ */
 .layout {
   display: grid;
@@ -85,6 +85,9 @@ h1 { font-size: 22px; margin-bottom: 4px; }
   #sharedQueueCard {
     max-height: 60vh;
   }
+  #errorPanel {
+    max-height: 50vh;
+  }
 }
 
 /* ============================================================
@@ -109,16 +112,12 @@ h1 { font-size: 22px; margin-bottom: 4px; }
   padding-right: 6px;
 }
 
-.queue-scroll::-webkit-scrollbar {
-  width: 8px;
-}
+.queue-scroll::-webkit-scrollbar { width: 8px; }
 .queue-scroll::-webkit-scrollbar-thumb {
   background: #c8c8c8;
   border-radius: 4px;
 }
-.queue-scroll::-webkit-scrollbar-thumb:hover {
-  background: #a0a0a0;
-}
+.queue-scroll::-webkit-scrollbar-thumb:hover { background: #a0a0a0; }
 
 /* ============================================================
    Fields
@@ -212,6 +211,77 @@ h1 { font-size: 22px; margin-bottom: 4px; }
 .balance-row .value { font-weight: 600; color: #0f5132; }
 .balance-row.sub { font-size: 11px; color: #666; }
 .balance-row.sub .value { font-weight: 400; color: #666; }
+
+/* ============================================================
+   Rate Limits Panel
+   ============================================================ */
+#rateLimitsPanel {
+  display: none;
+  margin-top: 14px;
+  padding: 10px 12px;
+  background: #fff8e6;
+  border: 1px solid #ffe69c;
+  border-radius: 8px;
+}
+.rate-limits-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.rate-limits-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: #664d03;
+}
+#resetRateLimitsBtn {
+  background: #f0ad4e;
+  color: #fff;
+  border: none;
+  padding: 3px 10px;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+}
+#resetRateLimitsBtn:hover { background: #ec971f; }
+.rate-limits-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+.rate-limit-field label {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #664d03;
+  margin-bottom: 3px;
+}
+.rate-limit-field label small {
+  font-weight: 400;
+  color: #997404;
+  font-size: 10px;
+}
+.rate-limit-field input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid #ffe69c;
+  border-radius: 6px;
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+  background: #fff;
+  color: #333;
+}
+.rate-limit-field input:focus {
+  outline: 2px solid #f0ad4e;
+  border-color: transparent;
+}
+#rateLimitsHint {
+  font-size: 11px;
+  color: #997404;
+  margin-top: 8px;
+  margin-bottom: 0;
+  line-height: 1.4;
+}
 
 /* ============================================================
    Input Method Selector
@@ -405,9 +475,7 @@ h1 { font-size: 22px; margin-bottom: 4px; }
 /* ============================================================
    Queue list
    ============================================================ */
-.queue-list {
-  margin-top: 0;
-}
+.queue-list { margin-top: 0; }
 .queue-item {
   display: flex;
   align-items: center;
@@ -450,7 +518,93 @@ h1 { font-size: 22px; margin-bottom: 4px; }
 .state-retrying { background: #fff3cd; color: #856404; }
 
 /* ============================================================
-   Extraction Results — full width below the two columns
+   Error Files Panel
+   ============================================================ */
+#errorPanel {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-bottom: 0;
+  overflow: hidden;
+  border-left: 4px solid #dc3545;
+}
+.error-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.error-panel-header h2 { color: #842029; }
+.error-scroll {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  min-height: 0;
+  max-height: 100%;
+  padding-right: 6px;
+}
+.error-scroll::-webkit-scrollbar { width: 8px; }
+.error-scroll::-webkit-scrollbar-thumb {
+  background: #c8c8c8;
+  border-radius: 4px;
+}
+.error-scroll::-webkit-scrollbar-thumb:hover { background: #a0a0a0; }
+.error-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.error-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid #f1aeb5;
+  border-radius: 8px;
+  background: #fdf1f2;
+  font-size: 12px;
+}
+.error-item img {
+  width: 40px;
+  height: 40px;
+  object-fit: cover;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+.error-item .info {
+  flex: 1;
+  min-width: 0;
+}
+.error-item .name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #842029;
+}
+.error-item .meta {
+  color: #b02a37;
+  font-size: 11px;
+  margin-top: 2px;
+}
+.error-item .retry-btn {
+  flex-shrink: 0;
+  background: #f0ad4e;
+  color: #fff;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.error-item .retry-btn:hover { background: #ec971f; }
+
+/* ============================================================
+   Extraction Results
    ============================================================ */
 .result-section {
   display: none;
@@ -638,7 +792,7 @@ td.cell-category-supplier {
 .legend .dot-supplier { background: #ffe5cc; border: 1px solid #8a4b00; }
 
 /* ============================================================
-   Summary Report (Key Parameters + Data Quality)
+   Summary Report
    ============================================================ */
 .summary-report {
   display: none;
@@ -1062,7 +1216,6 @@ td.cell-category-supplier {
 .error-summary .es-group.suspicious .es-count { background: #fff3cd; color: #664d03; }
 .error-summary .es-group.edited .es-group-header { color: #0f5132; }
 .error-summary .es-group.edited .es-count { background: #d1e7dd; color: #0f5132; }
-
 .error-summary .es-field-list {
   list-style: none;
   padding: 0;
@@ -1099,7 +1252,7 @@ td.cell-category-supplier {
   font-style: italic;
 }
 
-/* Toolbar separator + rotate buttons in the modal */
+/* Toolbar separator + rotate buttons */
 .image-toolbar .toolbar-sep {
   display: inline-block;
   width: 1px;
@@ -1120,7 +1273,7 @@ td.cell-category-supplier {
   border-color: #4a90e2;
 }
 
-/* ---------- Compression Progress ---------- */
+/* Compression Progress */
 .compress-progress-wrap {
   margin-top: 12px;
   padding: 10px 12px;
@@ -1154,116 +1307,4 @@ td.cell-category-supplier {
 .hint a:hover {
   color: #357abd;
   text-decoration: none;
-}
-/* ============================================================
-   Error Files Panel
-   ============================================================ */
-#errorPanel {
-  display: flex;
-  flex-direction: column;
-  flex: 1 1 auto;
-  min-height: 0;
-  margin-bottom: 0;
-  overflow: hidden;
-  border-left: 4px solid #dc3545;
-}
-
-.error-panel-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
-  flex-wrap: wrap;
-}
-
-.error-panel-header h2 {
-  color: #842029;
-}
-
-.error-scroll {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  overflow-x: hidden;
-  min-height: 0;
-  max-height: 100%;
-  padding-right: 6px;
-}
-
-.error-scroll::-webkit-scrollbar {
-  width: 8px;
-}
-.error-scroll::-webkit-scrollbar-thumb {
-  background: #c8c8c8;
-  border-radius: 4px;
-}
-.error-scroll::-webkit-scrollbar-thumb:hover {
-  background: #a0a0a0;
-}
-
-.error-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.error-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 10px;
-  border: 1px solid #f1aeb5;
-  border-radius: 8px;
-  background: #fdf1f2;
-  font-size: 12px;
-}
-
-.error-item img {
-  width: 40px;
-  height: 40px;
-  object-fit: cover;
-  border-radius: 6px;
-  flex-shrink: 0;
-}
-
-.error-item .info {
-  flex: 1;
-  min-width: 0;
-}
-
-.error-item .name {
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: #842029;
-}
-
-.error-item .meta {
-  color: #b02a37;
-  font-size: 11px;
-  margin-top: 2px;
-}
-
-.error-item .retry-btn {
-  flex-shrink: 0;
-  background: #f0ad4e;
-  color: #fff;
-  border: none;
-  padding: 6px 12px;
-  border-radius: 6px;
-  font-size: 11px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.error-item .retry-btn:hover {
-  background: #ec971f;
-}
-
-/* Narrow screen — stack them */
-@media (max-width: 1100px) {
-  #errorPanel {
-    max-height: 50vh;
-  }
 }
