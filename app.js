@@ -1085,7 +1085,12 @@ const smartRateLimiter = {
     console.log('[rate] Counter reset');
   }
 };
-
+// ============================================================
+//  Async sleep helper
+// ============================================================
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 async function onExtractClick() {
   const apiKey = apiKeyInput.value.trim();
   if (!apiKey) {
