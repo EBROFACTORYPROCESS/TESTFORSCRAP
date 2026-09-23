@@ -107,7 +107,7 @@ const FIELD_SCHEMA = {
   section_1: {
     codigo_conjunto: {
       type: 'string',
-      description: 'The handwritten value inside the box labeled "CÓDIGO CONJUNTO", in the first row of the form body directly under the colored header band. It is usually a LONG alphanumeric code (typically 8-20 characters). RULES: (1) REMOVE ALL EMPTY SPACES — if the handwritten code contains gaps between character groups, join them into a single string. Example: "60 200 57 84 AAAUH" → "602005784AAAUH". (2) The code may contain the characters / - . as internal separators — keep them. (3) SPECIAL CASE — MULTIPLE CODES ON ONE LINE: sometimes the operator writes TWO OR MORE material codes on the same line, separated by a special character such as "/", "-", "|", "+", or "&". In that case, return ALL codes joined by the original separator, but WITHOUT any spaces. Example: "609000503AA / 609000504BB" → "609000503AA/609000504BB". Example: "609000503AA-609000504BB" → "609000503AA-609000504BB". Do NOT split or drop any code. (4) Do NOT include special symbols like ? ! @ # $ % * ( ) = [ ] { } < >. Return the exact alphanumeric string.'
+      description: 'The handwritten value inside the box labeled "CÓDIGO CONJUNTO", in the first row of the form body directly under the colored header band. This is a MATERIAL CODE that follows specific patterns. RULES: (1) REMOVE ALL EMPTY SPACES — if the handwritten code contains gaps between character groups, join them into a single string. Example: "60 200 57 84 AAAUH" → "602005784AAAUH". (2) The code follows these PATTERNS: · Pattern A: 8 digits + "AA" (e.g. 555001255AA, 609000503AA). The AA suffix is almost always two letter As — NOT "AD". · Pattern B: 8 digits + "AAA" + 2 letters (e.g. 403013064AAABE). The AAA is three letter As in a row — NOT "DAA". · Pattern C: numeric prefix + "-" + longer body (e.g. 60-3611061AB, 368-6107118). · Pattern D: letter prefix + digits (e.g. J686107113). (3) COMMON MISREADINGS TO AVOID: · The digit "0" must NOT be read as the letter "O" inside a numeric body. · The digit "1" must NOT be read as "I" or "l". · The letter "A" must NOT be read as "D" or "4". · The digit "4" must NOT be read as "A". (4) MULTIPLE CODES ON ONE LINE: sometimes the operator writes TWO OR MORE material codes on the same line, separated by "/", "-", "|", "+", or "&". Return ALL codes joined by the original separator, without spaces. Example: "609000503AA / 609000504BB" → "609000503AA/609000504BB". (5) Do NOT read PRINTED form lines or grid borders as part of the code. ONLY read the BLUE or BLACK handwriting.'
     },
     codigo_componente: {
       type: 'string',
@@ -115,7 +115,7 @@ const FIELD_SCHEMA = {
     },
     codigo_rechaz: {
       type: 'string',
-      description: 'The handwritten value inside the small box labeled "CÓDIGO RECHAZ", on the LEFT side below "CÓDIGO COMPONENTE". This is a SHORT alphanumeric code of 3-5 characters. It commonly contains BOTH digits AND letters, e.g. "221M", "2216", "22M4", "A104", "2214". IMPORTANT: handwritten letters are easily confused with digits — for example "M" can look like "04", and "O" can look like "0". Read the STROKE SHAPE carefully: the letter "M" has two vertical strokes connected by diagonal strokes; it is NOT two separate digits. If the value looks like "22104" but the last two characters are clearly a handwritten "M", return "221M". Return the exact alphanumeric string as written (letters + digits), preserving the original order.'
+      description: 'The handwritten value inside the small box labeled "CÓDIGO RECHAZ", on the LEFT side below "CÓDIGO COMPONENTE". This is a SHORT reject code of 3-5 characters. It commonly contains BOTH digits AND letters, e.g. "221M", "2216", "22M4", "A104", "2214", "221R", "22P1". IMPORTANT — COMMON MISREADINGS: · Handwritten "M" can look like "04" — but "M" has two vertical strokes connected by diagonals, while "04" is a round zero followed by a separate digit. Read the STROKE SHAPE: if you see a connected zigzag pattern, it is an "M", not "04". · Handwritten "R" can look like "12" — but "R" has a rounded top and a diagonal leg, while "12" is two separate digits. If the value looks like "22112" but the last two characters are one connected stroke, it is likely "221R". · Handwritten "P" can look like "1o" or "10" — but "P" has a rounded top and a vertical stem. · The digit "0" must NOT be read as the letter "O" in a numeric body. · The letter "O" (if present) is only valid when it clearly has no crossbar and no diagonal stroke. Return the exact alphanumeric string as written.'
     },
     cantidad: {
       type: 'string',
@@ -129,7 +129,7 @@ const FIELD_SCHEMA = {
   section_2: {
     motivo_rechace: {
       type: 'string',
-      description: 'The rejection reason written INSIDE the box labeled "MOTIVO RECHACE", in the LOWER-LEFT of the form. The value is EITHER: (a) a KNOWN REJECT CODE from the list below, OR (b) a short brief description of the defect, e.g. "DESCASCARADA CON GOLPE DE CAJAS", "RAYADO", "GOLPE", "ROTO". The known codes are: 2276, 2272, 2250, 2213, 2210, 22F0, 2263, 22P1, 22B1, 221R, 221K, 221P, 221L, 221M, 221N, 6100. If the value matches one of these codes EXACTLY (including letter+digit mixes like "221M" or "22P1"), return the code as-is. If the value is a description instead of a code, return the description text as written. NEVER return a date, an operator ID, or a generic word like "FECHA". The value must be physically written INSIDE the MOTIVO RECHACE box.'
+      description: 'The rejection reason written INSIDE the box labeled "MOTIVO RECHACE", in the LOWER-LEFT of the form. The value is EITHER: (a) a KNOWN REJECT CODE from the list below, OR (b) a short brief description of the defect, e.g. "DESCASCARADA CON GOLPE DE CAJAS", "RAYADO", "GOLPE", "ROTO". The KNOWN REJECT CODES are: 2276, 2272, 2250, 2213, 2210, 22F0, 2263, 22P1, 22B1, 221R, 221K, 221P, 221L, 221M, 221N, 6100. RULES: · If the value matches one of these codes EXACTLY (including letter+digit mixes like "221M" or "22P1"), return the code as-is. · If the value is a description instead of a code, return the description text as written. · Do NOT confuse a printed form line with handwriting. · The digit "0" must NOT be read as the letter "O". · NEVER return a date, an operator ID, or a generic word like "FECHA". The value must be physically written INSIDE the MOTIVO RECHACE box.'
     },
     fecha: {
       type: 'string',
@@ -172,24 +172,42 @@ const FORMAT_RULES = {
   },
   'section_1.codigo_conjunto': {
     test: v => {
-      // Normalize: remove all spaces
+      // Remove spaces
       const s = v.trim().replace(/\s+/g, '');
       if (s.length < 8) return false;
-      // Reject special symbols (but allow / - . as separators)
-      if (/[?!@#$%&*()=+\[\]{}<>"';:`~^|\\]/.test(s)) return false;
+      // Reject hard-invalid special symbols
+      if (/[?!@#$%&*()\[\]{}<>"';:`~^|\\]/.test(s)) return false;
       // Must contain at least one digit
       if (!/\d/.test(s)) return false;
+
+      // Pattern checks (loose — allow multiple codes joined by separator)
+      const parts = s.split(/[\/|&+]/);
+      for (const part of parts) {
+        const ok =
+          /^[0-9]{8}AA[A-Z]{0,2}$/i.test(part) ||       // 8 digits + AA or AAA + letters
+          /^[0-9]{6,8}-[0-9A-Z]{6,12}$/i.test(part) ||   // dash pattern
+          /^[A-Z][0-9]{6,12}$/i.test(part) ||            // letter prefix + digits
+          /^[0-9A-Z]{8,20}$/i.test(part);                // lenient fallback
+        if (!ok) return false;
+      }
       return true;
     },
-    hint: 'Expected a long alphanumeric code (no spaces, may contain / - . as separators), or multiple codes joined by a separator.'
+    hint: 'Expected a material code (e.g. 555001255AA, 403013064AAABE, 60-3611061AB, J686107113) with no spaces, or multiple codes joined by / - | + &.'
   },
   'section_1.codigo_componente': {
     test: v => /[A-Za-z]/.test(v) && v.trim().length >= 4,
     hint: 'Expected a text description like "Pilar B/Sup/Der"'
   },
   'section_1.codigo_rechaz': {
-    test: v => /^[A-Z0-9]{3,5}$/i.test(v.trim().replace(/\s+/g, '')),
-    hint: 'Expected a 3-5 character alphanumeric code (digits and/or letters), e.g. "2216", "221M", "A104".'
+    test: v => {
+      const s = v.trim().replace(/\s+/g, '');
+      // 3-5 character alphanumeric code
+      if (!/^[A-Z0-9]{3,5}$/i.test(s)) return false;
+      // Must not be all letters (reject codes contain digits)
+      if (!/\d/.test(s)) return false;
+      return true;
+    },
+    hint: 'Expected a 3-5 character alphanumeric reject code (digits + letters), e.g. "2216", "221M", "A104".'
   },
   'section_1.cantidad': {
     test: v => {
@@ -302,6 +320,15 @@ function buildPromptText() {
   lines.push('   Do NOT guess or "spread" a value to fill empty fields.');
   lines.push('   If a box is EMPTY, return null for that field. An empty box is a valid answer.');
   lines.push('');
+  lines.push('5a. DISTINGUISH HANDWRITING FROM PRINTED FORM LINES:');
+  lines.push('   The form contains many PRINTED elements: box borders, grid lines, underlines, tick marks, and small printed reference numbers (like "10", "15", "31", "58", "66" in the corners).');
+  lines.push('   These PRINTED elements are PART OF THE FORM — they are NOT data. Do NOT read them as field values.');
+  lines.push('   HANDWRITING looks different: it is in BLUE or BLACK INK, usually cursive or loose, with variable stroke width and uneven spacing.');
+  lines.push('   PRINTED lines are uniform, thin, gray/black, and perfectly straight or perfectly box-shaped.');
+  lines.push('   If you see a straight line inside a box, it is the form line — NOT a digit "1".');
+  lines.push('   If you see a small printed number in the corner of a cell, it is the form reference number — NOT a value.');
+  lines.push('   ONLY read the HANDWRITTEN ink as field values.');
+  lines.push('');
   lines.push('5b. MULTI-BOX FIELD — origen_area_zona (exception to rule 4):');
   lines.push('   The field "origen_area_zona" reads from THREE possible boxes, checked in order of priority:');
   lines.push('     Priority 1 — ORIGEN row: this row has TWO adjacent sub-boxes labeled "AREA" (left) and "ZONA" (right).');
@@ -323,76 +350,39 @@ function buildPromptText() {
   lines.push('   Example: "609000503AA / 609000504BB" → "609000503AA/609000504BB".');
   lines.push('   Do NOT split or drop any code.');
   lines.push('');
+  lines.push('5d. MATERIAL CODE GRAMMAR — codigo_conjunto and codigo_rechaz:');
+  lines.push('   The material codes follow SPECIFIC PATTERNS. Use them to double-check your reading:');
+  lines.push('');
+  lines.push('   PATTERN A (numeric-body + AA-suffix): 8 digits followed by "AA".');
+  lines.push('     Examples: 555001255AA, 609000503AA, 403013061AA.');
+  lines.push('     The "AA" suffix is almost ALWAYS two letter As — NOT "AD", NOT "AB", NOT "AE".');
+  lines.push('     If you read "...AD" or "...AO" or "...AE", it is almost certainly "...AA" — check the stroke carefully.');
+  lines.push('     An "A" has a triangular peak and a horizontal cross-bar. A "D" has a rounded right side with no cross-bar.');
+  lines.push('');
+  lines.push('   PATTERN B (numeric-body + AAA-suffix + 2 letters): 8 digits followed by "AAA" followed by 2 letters.');
+  lines.push('     Examples: 403013064AAABE, 555001255AAABF, 610000123AAACD.');
+  lines.push('     The "AAA" is three letter As in a row — NOT "DAA", NOT "AAO", NOT "AAB".');
+  lines.push('     If you read "DAABE" or "AAOBE", it is almost certainly "AAABE" — the middle character is an "A", not a "D".');
+  lines.push('');
+  lines.push('   PATTERN C (with dash prefix): some codes have a numeric prefix followed by a dash and then a longer body.');
+  lines.push('     Examples: 60-3611061AB, 368-6107118.');
+  lines.push('     Keep the dash exactly as written.');
+  lines.push('');
+  lines.push('   PATTERN D (letter prefix): some codes start with a letter.');
+  lines.push('     Examples: J686107113.');
+  lines.push('     Keep the leading letter.');
+  lines.push('');
+  lines.push('   CRITICAL — COMMON MISREADINGS TO AVOID:');
+  lines.push('     · "0" (zero) vs "O" (letter O): in a numeric body, it is almost always a ZERO. Only at the START of a code (Pattern D) or as part of an AA-suffix anomaly would it be a letter O.');
+  lines.push('     · "1" (one) vs "I" (capital i) vs "l" (lowercase L): in a numeric body, it is a ONE.');
+  lines.push('     · "5" (five) vs "S": in a numeric body, it is a FIVE.');
+  lines.push('     · "8" (eight) vs "B": in a numeric body, it is an EIGHT.');
+  lines.push('     · "A" (letter) vs "4" (four): "A" has a flat base and a triangular peak; "4" has a vertical stroke and a horizontal cross-bar. They are DIFFERENT.');
+  lines.push('     · "A" vs "D": "A" is triangular with a cross-bar; "D" is rounded on the right with a straight left edge. If the middle of a code looks like "D", verify whether the right side has a cross-bar inside (that would make it an "A").');
+  lines.push('');
   lines.push('6. POSITIONAL ANCHORS (use these to locate each field):');
   lines.push('   - motivo_rechace:   LOWER-LEFT area, under the label "MOTIVO RECHACE". Value is a KNOWN CODE or a BRIEF DESCRIPTION. Known codes: 2276, 2272, 2250, 2213, 2210, 22F0, 2263, 22P1, 22B1, 221R, 221K, 221P, 221L, 221M, 221N, 6100.');
   lines.push('   - fecha:            BOTTOM-LEFT, small box with label "FECHA"');
   lines.push('   - operario:         BOTTOM-LEFT, small box with label "OPERARIO" (DIRECTLY BELOW fecha)');
   lines.push('   - observaciones:    BOTTOM-CENTER, wide box with label "OBSERVACIONES"');
-  lines.push('   - cantidad:         MIDDLE-RIGHT, box labeled "CANTIDAD". The value may include a "+" or "-" between numbers, e.g. "1+1", "2+3". This is NORMAL — return the full expression AS WRITTEN, do NOT collapse it into "11".');
-  lines.push('   - codigo_rechaz:    MIDDLE-LEFT, small box labeled "CÓDIGO RECHAZ"');
-  lines.push('   - origen_area_zona: LEFT-MIDDLE, sourced from ORIGEN (AREA+ZONA) or ZONA O LÍNEA or DETECTADO. See rule 5b.');
-  lines.push('   These boxes are in DIFFERENT physical locations. A value written in one box cannot appear in another.');
-  lines.push('');
-  lines.push('7. Each field description below tells you exactly where its label is and what its value should look like.');
-  lines.push('8. For handwritten values, transcribe exactly what you see.');
-  lines.push('9. SIGNATURE FIELDS — READ CAREFULLY:');
-  lines.push('   The form has THREE independent signature boxes near the bottom:');
-  lines.push('     - "Inspector"       (bottom-left)');
-  lines.push('     - "Calidad" / "Vº Bº C. CALIDAD"  (bottom-center)');
-  lines.push('     - "Encargado" / "ENCARGADO LÍNEA" (bottom-right)');
-  lines.push('   Return "Signed" ONLY IF the box contains one of:');
-  lines.push('     (a) a handwritten CURSIVE signature — continuous flowing strokes forming a name or initials,');
-  lines.push('     (b) a RUBBER STAMP — a stamped mark of about 5 characters, typically 2 letters + 3 digits (e.g. "JE673"), printed in a uniform font.');
-  lines.push('   Return "Not Signed" for ALL OTHER cases, including:');
-  lines.push('     - the box is empty (only the printed label)');
-  lines.push('     - the box contains only a printed red line or underline');
-  lines.push('     - the box contains only a single isolated letter (e.g. "A")');
-  lines.push('     - the box contains only a short numeric code');
-  lines.push('     - the box contains a defect word or description');
-  lines.push('   A single letter is NOT a signature. A red line is NOT a signature. Only cursive writing or a 5-character stamp counts.');
-  lines.push('   The three boxes are INDEPENDENT — a signature or stamp in one box does NOT imply the others are signed.');
-  lines.push('10. If a non-signature field is empty or illegible, use null. NEVER copy a neighbor value to fill it.');
-  lines.push('');
-  lines.push('Return a valid JSON object with the structure below:');
-  lines.push('');
-
-  const obj = {};
-  const sections = Object.keys(FIELD_SCHEMA);
-  sections.forEach(section => {
-    obj[section] = {};
-    Object.keys(FIELD_SCHEMA[section]).forEach(field => {
-      obj[section][field] = FIELD_SCHEMA[section][field].description;
-    });
-  });
-  lines.push(JSON.stringify(obj, null, 2));
-  lines.push('');
-  lines.push('Return ONLY the JSON object. No markdown fences, no explanations.');
-  return lines.join('\n');
-}
-
-function buildJsonSchema() {
-  const properties = {};
-  const sections = Object.keys(FIELD_SCHEMA);
-  sections.forEach(section => {
-    properties[section] = {
-      type: 'object',
-      properties: {},
-      required: Object.keys(FIELD_SCHEMA[section])
-    };
-    Object.keys(FIELD_SCHEMA[section]).forEach(field => {
-      properties[section].properties[field] = {
-        type: FIELD_SCHEMA[section][field].type,
-        description: FIELD_SCHEMA[section][field].description
-      };
-    });
-  });
-  return { type: 'object', properties, required: sections };
-}
-
-function checkFormat(path, value) {
-  const rule = FORMAT_RULES[path];
-  if (!rule) return 'ok';
-  if (value === null || value === undefined || String(value).trim() === '') return 'missing';
-  const s = String(value).trim();
-  try { return rule.test(s) ? 'ok' : 'format-mismatch'; } catch (e) { return 'ok'; }
-}
+  lines.push('   - cantidad:         MIDDLE-RIGHT, box labeled "CANTIDAD". The value may include a "+" or "-" between numbers, e.g.
