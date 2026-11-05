@@ -7956,4 +7956,233 @@ function exportMasterWhereUsed() {
 window.addEventListener('DOMContentLoaded', () => {
   setTimeout(initBulkSearch, 150);
 });
+/* =========================================================
+   SHAREPOINT DATABASE SYNC HUB
+   ========================================================= */
+const PA_CONFIG = {
+  // REPLACE THESE WITH YOUR ACTUAL POWER AUTOMATE URLS
+  pullUrl: 'https://prod-00.westeurope.logic.azure.com:443/workflows/.../triggers/manual/paths/invoke?...',
+  pushUrl: 'https://prod-00.westeurope.logic.azure.com:443/workflows/.../triggers/manual/paths/invoke?...'
+};
+
+STATE.sync = {
+  mode: 'read', // 'read' | 'update'
+  lastSync: localStorage.getItem('mrp_lastSync') || 'Never',
+  hasUnsavedChanges: false
+};
+
+function initDbSync() {
+  const topbar = document.querySelector('.topbar');
+  if (!topbar) return;
+
+  // Inject UI
+  const syncBar = document.createElement('div');
+  syncBar.id = 'dbSyncBar';
+  syncBar.className = 'sync-bar read-only';
+  syncBar.innerHTML = `
+    <div class="sync-status">
+      <span class="sync-dot"></span>
+      <span><b>Database:</b> <span id="syncModeLabel">Display Mode (Read-Only)</span></span>
+      <span style="color:#94a3b8; margin-left:12px; font-size:12px;">Last Pull: <span id="syncLastLabel">${STATE.sync.lastSync}</span></span>
+    </div>
+    <div class="sync-actions">
+      <button class="btn tiny ghost" id="btnPullDb" style="color:#fff; border-color:#475569;">📥 Pull Latest</button>
+      <button class="btn tiny primary" id="btnToggleMode">🔓 Unlock Update</button>
+      <button class="btn tiny danger update-only" id="btnPushDb" style="display:none;">📤 Push Changes</button>
+    </div>
+  `;
+  topbar.insertAdjacentElement('afterend', syncBar);
+
+  // Bind events
+  document.getElementById('btnToggleMode').addEventListener('click', toggleDbMode);
+  document.getElementById('btnPullDb').addEventListener('click', pullDatabase);
+  document.getElementById('btnPushDb').addEventListener('click', pushDatabase);
+
+  // Apply initial state
+  applySyncMode();
+
+  // Mark dirty on data mutations (Hook into standard functions)
+  const originalRenderBomList = renderBomList;
+  renderBomList = function() {
+    markUnsaved();
+    return originalRenderBomList.apply(this, arguments);
+  };
+}
+
+function applySyncMode() {
+  const bar = document.getElementById('dbSyncBar');
+  const label = document.getElementById('syncModeLabel');
+  const toggleBtn = document.getElementById('btnToggleMode');
+  const pushBtn = document.getElementById('btnPushDb');
+
+  if (STATE.sync.mode === 'read') {
+    document.body.classList.add('is-read-only');
+    bar.classList.remove('update-mode');
+    bar.classList.add('read-only');
+    label.textContent = 'Display Mode (Read-Only)';
+    toggleBtn.textContent = '🔓 Unlock Update';
+    toggleBtn.className = 'btn tiny primary';
+    pushBtn.style.display = 'none';
+  } else {
+    document.body.classList.remove('is-read-only');
+    bar.classList.remove('read-only');
+    bar.classList.add('update-mode');
+    label.textContent = 'Update Mode (Editable)';
+    toggleBtn.textContent = '🔒 Lock & Switch to Read-Only';
+    toggleBtn.className = 'btn tiny ghost';
+    pushBtn.style.display = 'inline-block';
+  }
+}
+
+function toggleDbMode() {
+  if (STATE.sync.mode === 'update') {
+    if (STATE.sync.hasUnsavedChanges) {
+      if (!confirm('You have unsaved changes. Switching to Read-Only mode will discard them. Continue?')) return;
+    }
+    STATE.sync.mode = 'read';
+    STATE.sync.hasUnsavedChanges = false;
+    applySyncMode();
+    showToast('Switched to Display Mode.');
+    return;
+  }
+
+  // Trying to unlock
+  const pwd = prompt('Enter Passcode to unlock Update Mode:');
+  if (pwd === 'admin') {
+    STATE.sync.mode = 'update';
+    applySyncMode();
+    showToast('Update Mode Unlocked.');
+  } else if (pwd !== null) {
+    alert('Incorrect Passcode.');
+  }
+}
+
+function markUnsaved() {
+  if (STATE.sync.mode === 'update' && !STATE.sync.hasUnsavedChanges) {
+    STATE.sync.hasUnsavedChanges = true;
+    const pushBtn = document.getElementById('btnPushDb');
+    if (pushBtn) pushBtn.classList.add('pending');
+  }
+}
+
+/* =========================================================
+   PULL LOGIC
+   ========================================================= */
+async function pullDatabase() {
+  if (STATE.sync.hasUnsavedChanges) {
+    if (!confirm('You have unsaved local changes. Pulling the latest database will overwrite them. Continue?')) return;
+  }
+
+  const btn = document.getElementById('btnPullDb');
+  btn.textContent = '⏳ Pulling...';
+  btn.disabled = true;
+
+  try {
+    // In a real scenario, this fetches from PA_CONFIG.pullUrl
+    // const res = await fetch(PA_CONFIG.pullUrl, { method: 'GET' });
+    // const data = await res.json();
+    
+    // MOCK DATA FOR TESTING (Remove this block when PA is ready)
+    await new Promise(r => setTimeout(r, 1000)); // Fake network delay
+    const data = {
+      boms: STATE.boms, // In reality, this comes from SharePoint
+      batches: STATE.batches,
+      scrap: STATE.scrap,
+      readiness: STATE.materialReadiness,
+      config: STATE.config
+    };
+
+    // Apply data
+    if (data.boms) STATE.boms = data.boms;
+    if (data.batches) STATE.batches = data.batches;
+    if (data.scrap) STATE.scrap = data.scrap;
+    if (data.readiness) STATE.materialReadiness = data.readiness;
+    if (data.config) STATE.config = data.config;
+
+    // Rebuild indexes and render
+    rebuildPartIndex();
+    reanalyseAllSpecs(); // Fix BOM IDs just in case
+    if (typeof classifyBatches === 'function') classifyBatches();
+    
+    renderBomList(); 
+    renderBomTable(); 
+    renderBatchTable(); 
+    renderBatchStats();
+    computeInventory(); 
+    renderInventoryTable(); 
+    renderPlanning();
+    if (typeof renderMrLedger === 'function') renderMrLedger();
+
+    STATE.sync.lastSync = new Date().toLocaleString();
+    localStorage.setItem('mrp_lastSync', STATE.sync.lastSync);
+    document.getElementById('syncLastLabel').textContent = STATE.sync.lastSync;
+    STATE.sync.hasUnsavedChanges = false;
+
+    showToast('Database pulled successfully.');
+  } catch (e) {
+    console.error(e);
+    alert('Failed to pull database: ' + e.message);
+  } finally {
+    btn.textContent = '📥 Pull Latest';
+    btn.disabled = false;
+  }
+}
+
+/* =========================================================
+   PUSH LOGIC
+   ========================================================= */
+async function pushDatabase() {
+  if (STATE.sync.mode !== 'update') return;
+
+  const btn = document.getElementById('btnPushDb');
+  btn.textContent = '⏳ Pushing...';
+  btn.disabled = true;
+
+  const payload = {
+    boms: STATE.boms,
+    batches: STATE.batches,
+    scrap: STATE.scrap,
+    readiness: STATE.materialReadiness,
+    config: STATE.config,
+    timestamp: new Date().toISOString()
+  };
+
+  try {
+    // In a real scenario, this posts to PA_CONFIG.pushUrl
+    /*
+    await fetch(PA_CONFIG.pushUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    */
+
+    // MOCK PUSH
+    await new Promise(r => setTimeout(r, 1500)); // Fake network delay
+    console.log('Pushed to SharePoint:', payload);
+
+    STATE.sync.lastSync = new Date().toLocaleString();
+    localStorage.setItem('mrp_lastSync', STATE.sync.lastSync);
+    document.getElementById('syncLastLabel').textContent = STATE.sync.lastSync;
+    STATE.sync.hasUnsavedChanges = false;
+    btn.classList.remove('pending');
+
+    // Confirmation and Refresh Prompt
+    if (confirm('Database updated successfully.\n\nIt is recommended to refresh the page now to ensure all users are looking at the latest structural definitions. Refresh now?')) {
+      window.location.reload();
+    }
+
+  } catch (e) {
+    console.error(e);
+    alert('Failed to push database: ' + e.message);
+  } finally {
+    btn.textContent = '📤 Push Changes';
+    btn.disabled = false;
+  }
+}
+
+/* Initialize on load */
+window.addEventListener('DOMContentLoaded', () => {
+  setTimeout(initDbSync, 200);
+});
 window.MRP = STATE;
