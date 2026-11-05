@@ -1905,3 +1905,57 @@ details.prod-line-group:not([open]) > .prod-line-header::before {
   padding: 6px 8px 8px;
   background: #fff;
 }
+/* =========================================================
+   Database Sync Hub
+   ========================================================= */
+.sync-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 24px;
+  background: #1e293b;
+  color: #f8fafc;
+  font-size: 13px;
+  position: sticky;
+  top: 60px; /* Adjust based on your topbar height */
+  z-index: 45;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+.sync-bar.read-only { background: #334155; }
+.sync-bar.update-mode { background: #0f172a; border-bottom: 2px solid #3b82f6; }
+
+.sync-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.sync-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: #10b981; box-shadow: 0 0 8px #10b981;
+}
+.sync-dot.offline { background: #ef4444; box-shadow: none; }
+
+.sync-actions {
+  display: flex;
+  gap: 10px;
+}
+
+/* Global Read-Only Lock: Visually disable inputs that modify data */
+body.is-read-only #bomFolderPick,
+body.is-read-only #bomFolderProcess,
+body.is-read-only #batchFilePick,
+body.is-read-only #batchFileProcess,
+body.is-read-only #scrapAdd,
+body.is-read-only #scrapUploadBtn,
+body.is-read-only .md-del,
+body.is-read-only .btn.danger,
+body.is-read-only #autoClassify,
+body.is-read-only #batchInput,
+body.is-read-only #bomInput {
+  opacity: 0.4;
+  pointer-events: none;
+  user-select: none;
+}
+
+/* Hide specific elements entirely in read-only mode */
+body.is-read-only .update-only { display: none !important; }
