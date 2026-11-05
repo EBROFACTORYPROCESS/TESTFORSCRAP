@@ -1,0 +1,7959 @@
+/* =========================================================
+   MRP Planner v1.5
+   ========================================================= */
+const STATE = {
+  config: null,
+  boms: [],
+  batches: [],
+  inventory: {},
+  partIndex: {},
+  scrap: [],
+  plan: [],
+  batchView: { sorts: {}, filters: {} },
+  bomRegistry: new Map(),   // "specKey||color||signature" → "BOM N"
+  bomCounter:  new Map(),    // "specKey||color"            → N
+  production: {
+    records: [],
+    batches: new Map(),
+    header: null,
+    loaded: false,
+    period:        { from: '', to: '' },
+    pendingPeriod: { from: '', to: '' },
+    periodStage:        '',   // '' = any milestone  ← ADD
+    pendingPeriodStage: '',   // ← ADD 
+    lines:         null,   // Set of selected lines, or null = all
+    pendingLines:  null,
+    models:        null,   // Set of selected models, or null = all
+    pendingModels: null,
+    batchView: { search: '', filter: 'all' },
+    vinView:   { page: 1, pageSize: 100, search: '', stage: 'all' }
+  }
+};
+
+const $  = (s, r=document) => r.querySelector(s);
+const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
+const fmt = n => (n==null||isNaN(n)) ? '' : Number(n).toLocaleString(undefined,{maximumFractionDigits:3});
+const today = () => { const d = new Date(); d.setHours(0,0,0,0); return d; };
+const LS_CONFIG = 'mrp.configOverrides.v1';
+const LS_SCRAP  = 'mrp.scrap.v2';
+/* =========================================================
+   VEHICLE-LEVEL BOM IDENTITY — v1.6.0
+   ========================================================= */
+
+/* A colour part ends with literal "AAA" + 2 alphanumeric chars. */
+function isColourPartNo(partNo) {
+  const p = String(partNo || '').trim();
+  return p.length >= 5 && /AAA[0-9A-Z]{2}$/.test(p);
+}
+function prefixOfColourPart(partNo) {
+  const p = String(partNo || '').trim();
+  return p.length >= 2 ? p.slice(0, -2) : p;
+}
+function suffixOfColourPart(partNo) {
+  const p = String(partNo || '').trim();
+  return p.length >= 2 ? p.slice(-2) : '';
+}
+
+/* Normalised signature. isExteriorFn(partNo) -> boolean.
+   Exterior parts emit P+"XX"; interior / common parts emit raw. */
+function bomSignatureNormalised(bom, isExteriorFn) {
+  if (!bom || !bom.parts) return '';
+  
+  const aggregated = new Map();
+  for (const p of bom.parts) {
+    const raw = String(p.partNo || '').trim();
+    const nrm = (isColourPartNo(raw) && isExteriorFn(raw))
+      ? prefixOfColourPart(raw) + 'XX'
+      : raw;
+    const uom = (p.uom || '').trim();
+    const key = `${nrm}||${uom}`;
+    const qty = Number(p.qty) || 0;
+    
+    if (aggregated.has(key)) {
+      aggregated.get(key).qty += qty;
+    } else {
+      aggregated.set(key, { pn: nrm, uom: uom, qty: qty });
+    }
+  }
+
+  const tuples = Array.from(aggregated.values());
+  tuples.sort((a, b) => {
+    const c = a.pn.localeCompare(b.pn);
+    if (c) return c;
+    if (a.qty !== b.qty) return a.qty - b.qty;
+    return a.uom.localeCompare(b.uom);
+  });
+
+  return tuples.map(t => `${t.pn}|${t.qty}|${t.uom}`).join(';');
+}
+/* Batch sort key — trailing YYYY MM <counter> from the batch ID. */
+function batchSortKey(batchId) {
+  const s = String(batchId || '');
+  const m = s.match(/(\d{4})(\d{2})(\d+)$/);
+  if (!m) return { primary: Infinity, secondary: s };
+  const year  = parseInt(m[1], 10);
+  const month = parseInt(m[2], 10);
+  const seq   = parseInt(m[3], 10);
+  return {
+    primary:   year * 10000000 + month * 10000 + seq,
+    secondary: s
+  };
+}
+function compareBatchIds(a, b) {
+  const ka = batchSortKey(a);
+  const kb = batchSortKey(b);
+  if (ka.primary !== kb.primary) return ka.primary - kb.primary;
+  return ka.secondary.localeCompare(kb.secondary);
+}
+
+/* Per-spec prefix index: Map<prefix, [{suffix, exterior}]> */
+function buildSpecPrefixIndex(specKey) {
+  const idx = new Map();
+  for (const bom of STATE.boms) {
+    if (specKeyOf(bom.vehicleMatNo) !== specKey) continue;
+    const ext = colorCodeOf(bom.vehicleMatNo);
+    for (const p of bom.parts) {
+      const raw = String(p.partNo || '').trim();
+      if (!isColourPartNo(raw)) continue;
+      const prefix = prefixOfColourPart(raw);
+      const suffix = suffixOfColourPart(raw);
+      if (!idx.has(prefix)) idx.set(prefix, []);
+      idx.get(prefix).push({ suffix, exterior: ext });
+    }
+  }
+  return idx;
+}
+
+/* Exterior prefixes for a spec = every occurrence has suffix === its vehicle's exterior. */
+function computeExteriorPrefixes(specKey) {
+  const idx = buildSpecPrefixIndex(specKey);
+  const out = new Set();
+  for (const [prefix, occ] of idx) {
+    if (occ.length && occ.every(o => o.suffix === o.exterior)) out.add(prefix);
+  }
+  return out;
+}
+
+function bomsForBomId(bomId) {
+  return STATE.boms.filter(b => b.bomId === bomId);
+}
+/* ---------------- BOM key helpers ---------------- */
+function bomKeyOf(bom) {
+  if (!bom) return '';
+  return (bom.vehicleMatNo || '') + '||' + (bom.batchId || '');
+}
+function bomDisplayName(bom) {
+  if (!bom) return '';
+  const parts = [];
+  if (bom.vehicleDesc) parts.push(bom.vehicleDesc);
+  if (bom.batchId)     parts.push(bom.batchId);
+  return parts.join(' — ') || bom.vehicleMatNo || 'BOM';
+}
+
+/* ---------------- Colour / spec helpers ---------------- */
+function colorCodeOf(vehicleMatNo) {
+  const v = (vehicleMatNo || '').trim();
+  if (v.length < 9) return '';
+  return v.substring(7, 9);          // chars 8–9, 1-based
+}
+function specKeyOf(vehicleMatNo) {
+  const v = (vehicleMatNo || '').trim();
+  if (v.length < 9) return v || '__no_matno__';
+  return v.substring(0, 7) + '··' + v.substring(9);
+}
+function longestCommonPrefix(strs) {
+  if (!strs.length) return '';
+  let p = strs[0];
+  for (const s of strs) {
+    while (p && !s.startsWith(p)) p = p.slice(0, -1);
+    if (!p) break;
+  }
+  return p;
+}
+function deriveSpecName(boms) {
+  if (boms.length === 1) return boms[0].vehicleDesc || boms[0].vehicleMatNo || '—';
+  const descs = boms.map(b => b.vehicleDesc || '').filter(Boolean);
+  if (!descs.length) return boms[0].vehicleMatNo || '—';
+  const lcp = longestCommonPrefix(descs)
+    .replace(/[\s\-–—:_,]+$/, '').trim();
+  return lcp || boms[0].vehicleMatNo || '—';
+}
+function deriveColorName(boms, specName) {
+  const desc = boms[0].vehicleDesc || '';
+  if (!desc) return '';
+  if (specName && desc.startsWith(specName)) {
+    const rest = desc.slice(specName.length)
+      .replace(/^[\s\-–—:_,]+/, '').trim();
+    if (rest && rest !== desc) return rest;
+  }
+  return '';
+}
+function colorBadgeStyle(code) {
+  if (!code) return 'background:#f1f5f9;color:#64748b';
+  let h = 0;
+  for (let i = 0; i < code.length; i++) h = (h * 31 + code.charCodeAt(i)) | 0;
+  const hue = Math.abs(h) % 360;
+  return `background:hsl(${hue},70%,92%);color:hsl(${hue},65%,32%)`;
+}
+/* Material-code family: vehicle material number with the colour code (chars 8–9)
+   replaced by XX.  T7150U5CLNG0901 → T7150U5XXNG0901
+   Groups different SKD/DKD/CKD variants and model-year evolutions of the same spec. */
+function matFamilyOf(vehicleMatNo) {
+  const v = (vehicleMatNo || '').trim();
+  if (v.length < 9) return v || '__no_matno__';
+  return v.substring(0, 7) + 'XX' + v.substring(9);
+}
+
+/* Render the family key with the XX substitution highlighted. */
+function matFamilyBadgeHtml(famKey) {
+  const s = String(famKey || '');
+  const i = s.indexOf('XX');
+  if (i < 0) return escapeHtml(s);
+  return escapeHtml(s.slice(0, i))
+       + '<span class="xx">XX</span>'
+       + escapeHtml(s.slice(i + 2));
+}
+/* ---------------- BOM-ID assignment (scoped per spec + colour) ---------------- */
+function bomSignature(bom) {
+  if (!bom || !bom.parts) return '';
+  return bom.parts
+    .slice()
+    .sort((a, b) => {
+      const p = String(a.partNo).localeCompare(String(b.partNo));
+      if (p) return p;
+      const q = (Number(a.qty) || 0) - (Number(b.qty) || 0);
+      if (q) return q;
+      return String(a.uom || '').localeCompare(String(b.uom || ''));
+    })
+    .map(p => `${p.partNo}|${Number(p.qty) || 0}|${(p.uom || '').trim()}`)
+    .join(';');
+}
+
+/* Group key is spec-only — colour is NOT part of BOM identity. */
+function bomGroupKey(bom) {
+  return specKeyOf(bom.vehicleMatNo);
+}
+
+/* Phase 1 — provisional BOM ID (per-vehicle classification). */
+function assignBomId(bom) {
+  if (!(STATE.bomRegistry instanceof Map)) STATE.bomRegistry = new Map();
+  if (!(STATE.bomCounter  instanceof Map)) STATE.bomCounter  = new Map();
+
+  const specKey = specKeyOf(bom.vehicleMatNo);
+  const ext     = colorCodeOf(bom.vehicleMatNo);
+
+  /* Provisional classifier: colour part counts as exterior iff its suffix
+     equals this vehicle's own exterior code. */
+  const sig = bomSignatureNormalised(bom, (pn) => suffixOfColourPart(pn) === ext);
+  bom._normalisedSig = sig;
+
+  const sigKey = specKey + '||' + sig;
+
+  if (STATE.bomRegistry.has(sigKey)) {
+    bom.bomId = STATE.bomRegistry.get(sigKey);
+  } else {
+    const n = (STATE.bomCounter.get(specKey) || 0) + 1;
+    STATE.bomCounter.set(specKey, n);
+    bom.bomId = 'BOM ' + n;
+    STATE.bomRegistry.set(sigKey, bom.bomId);
+  }
+  return bom.bomId;
+}
+/* =========================================================
+   PHASE 2 — spec-wide re-analysis
+   ========================================================= */
+
+/* Re-run classification and re-number all BOMs of one spec.
+   Returns { specKey, changed } — changed is the number of BOMs whose ID shifted. */
+function reanalyseSpecBomIds(specKey) {
+  const boms = STATE.boms.filter(b => specKeyOf(b.vehicleMatNo) === specKey);
+  if (!boms.length) return { specKey, changed: 0 };
+
+  /* Final signatures — using Phase 1 (per-vehicle) logic */
+  const sigByBom = new Map();
+  for (const b of boms) {
+    const ext = colorCodeOf(b.vehicleMatNo);
+    const sig = bomSignatureNormalised(b, pn => suffixOfColourPart(pn) === ext);
+    sigByBom.set(b, sig);
+    b._normalisedSig = sig;
+  }
+
+  /* Clear this spec's prior state */
+  STATE.bomCounter.delete(specKey);
+  for (const k of Array.from(STATE.bomRegistry.keys())) {
+    if (k.startsWith(specKey + '||')) STATE.bomRegistry.delete(k);
+  }
+
+  /* Sort by batch key (chronological), assign IDs on first sight of a signature */
+  const sorted = boms.slice().sort((a, b) => compareBatchIds(a.batchId, b.batchId));
+  const sigToId = new Map();
+  let counter = 0;
+  let changed = 0;
+
+  for (const b of sorted) {
+    const sig = sigByBom.get(b);
+    let id;
+    if (sigToId.has(sig)) {
+      id = sigToId.get(sig);
+    } else {
+      counter++;
+      id = 'BOM ' + counter;
+      sigToId.set(sig, id);
+      STATE.bomRegistry.set(specKey + '||' + sig, id);
+    }
+    if (b.bomId !== id) changed++;
+    b.bomId = id;
+  }
+  STATE.bomCounter.set(specKey, counter);
+  return { specKey, changed };
+}
+
+function reanalyseAllSpecs() {
+  const specs = new Set();
+  for (const b of STATE.boms) specs.add(specKeyOf(b.vehicleMatNo));
+  let total = 0;
+  for (const sk of specs) total += reanalyseSpecBomIds(sk).changed;
+  return total;
+}
+
+/* Minimal, non-blocking toast */
+function showToast(message, opts = {}) {
+  let wrap = document.getElementById('toastWrap');
+  if (!wrap) {
+    wrap = document.createElement('div');
+    wrap.id = 'toastWrap';
+    wrap.className = 'toast-wrap';
+    document.body.appendChild(wrap);
+  }
+  const el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = message;
+  wrap.appendChild(el);
+  requestAnimationFrame(() => el.classList.add('toast-visible'));
+  setTimeout(() => {
+    el.classList.remove('toast-visible');
+    setTimeout(() => el.remove(), 300);
+  }, opts.duration || 4200);
+}
+/* Material List rows with their Where Used panel expanded */
+const WHERE_USED_OPEN = new Set();
+/* Production batches with their VIN detail panel expanded */
+const PROD_BATCH_EXPANDED = new Set();
+/* Batch table column definitions */
+const BATCH_COLS = [
+  { id:'batch',      label:'Batch' },
+  { id:'model',      label:'Model' },
+  { id:'color',      label:'Color' },
+  { id:'qty',        label:'Qty', num:true, sortable:true },
+  { id:'ship',       label:'Ship' },
+  { id:'arrival',    label:'Arrival',   date:true },
+  { id:'decanting',  label:'Decanting', date:true },
+  { id:'trimIn',     label:'Trim-in',   date:true },
+  { id:'production', label:'Production' },
+  { id:'stage',      label:'Stage' },
+  { id:'warehouse',  label:'Warehouse' },
+  { id:'linkedBom',  label:'Linked BOM' }
+];
+
+/* =========================================================
+   BOOT
+   ========================================================= */
+window.addEventListener('DOMContentLoaded', async () => {
+  await loadConfig();
+  loadPersistedOverrides();
+  loadPersistedScrap();
+  bindTabs();
+  bindUploads();
+  bindButtons();
+  bindProduction();
+  bindStoredFilesTab();
+  bindPersistentFileSlots();
+  bindComparison();
+  bindStockCalc();
+  bindBomDisplayModal();
+  bindFilterPopupGlobal();
+  renderConversionTable();
+  renderWarehouseEditor();
+  renderWarehouseChecklist();
+  renderScrapList();
+  $('#todayBadge').textContent = fmtDate(new Date());
+  $('#c_safety').value          = STATE.config.shortageDefaults.safetyFactor;
+  $('#c_factoryFloor').checked  = STATE.config.shortageDefaults.includeFactoryFloor;
+  $('#c_edgeLine').checked      = STATE.config.shortageDefaults.includeEdgeLine;
+  $('#c_inTransit').checked     = STATE.config.shortageDefaults.includeInTransit;   
+  await renderAllFileChips();
+  await renderStoredFilesTab();
+  await autoReloadStoredFiles();
+
+});
+
+async function loadConfig() {
+  const defaults = {
+    defaultWarehouseId: 'CY',
+    autoAssignDefaultWarehouse: true,
+    warehouses: [
+      {id:'CY',  name:'Container Yard', enabled:true},
+      {id:'WH2', name:'Warehouse 2',    enabled:true},
+      {id:'WH3', name:'Warehouse 3',    enabled:true},
+      {id:'WH4', name:'Warehouse 4',    enabled:true}
+    ],
+    stages: {
+      inTransit:{label:'In Transit',color:'#3b82f6'},
+      warehouse:{label:'Warehouse',color:'#8b5cf6'},
+      factoryFloor:{label:'Factory Floor',color:'#f59e0b'},
+      edgeLine:{label:'Edge Line',color:'#10b981'},
+      consumed:{label:'Consumed',color:'#9ca3af'}
+    },
+    shortageDefaults:{safetyFactor:1.0,includeInTransit:false,includeWarehouses:true,includeFactoryFloor:true,includeEdgeLine:true},
+    conversionTable: []
+  };
+  try {
+    const res = await fetch('config.json');
+    STATE.config = Object.assign({}, defaults, await res.json());
+    for (const k of Object.keys(defaults)) if (!(k in STATE.config)) STATE.config[k] = defaults[k];
+  } catch (e) {
+    console.warn('config.json not loaded — using defaults', e);
+    STATE.config = defaults;
+  }
+}
+
+function loadPersistedOverrides() {
+  try {
+    const raw = localStorage.getItem(LS_CONFIG);
+    if (!raw) return;
+    const o = JSON.parse(raw);
+    if (o.warehouses) STATE.config.warehouses = o.warehouses;
+    if (o.conversionTable) STATE.config.conversionTable = o.conversionTable;
+  } catch(e){}
+}
+function savePersistedOverrides() {
+  try {
+    localStorage.setItem(LS_CONFIG, JSON.stringify({
+      warehouses: STATE.config.warehouses,
+      conversionTable: STATE.config.conversionTable
+    }));
+  } catch(e){}
+}
+function loadPersistedScrap() {
+  try {
+    const raw = localStorage.getItem(LS_SCRAP);
+    if (raw) STATE.scrap = JSON.parse(raw) || [];
+  } catch(e){ STATE.scrap = []; }
+}
+function savePersistedScrap() {
+  try { localStorage.setItem(LS_SCRAP, JSON.stringify(STATE.scrap)); } catch(e){}
+}
+
+/* =========================================================
+   TABS
+   ========================================================= */
+function bindTabs() {
+  $$('.tab').forEach(t => t.addEventListener('click', () => {
+    $$('.tab').forEach(x => x.classList.remove('active'));
+    $$('.tab-panel').forEach(x => x.classList.remove('active'));
+    t.classList.add('active');
+    $('#panel-' + t.dataset.tab).classList.add('active');
+    if (t.dataset.tab === 'files') setTimeout(renderStoredFilesTab, 0);
+    if (t.dataset.tab === 'comparison') {
+      setTimeout(renderComparison, 0);
+    }
+  }));
+}
+
+/* =========================================================
+   UPLOADS
+   ========================================================= */
+function bindUploads() {
+  wireDropzone('#bomDrop',   '#bomInput',   handleBomFiles);
+  wireDropzone('#batchDrop', '#batchInput', handleBatchFiles);
+}
+/* Like wireDropzone, but the click handler is replaced with a persistent picker.
+   Drag-and-drop still works with the old handler. */
+function wirePersistentDropzone(dzSel, inputSel, pickFn, dropHandler) {
+  const dz = $(dzSel), input = $(inputSel);
+  if (!dz || !input) return;
+
+  input.addEventListener('change', e => {
+    dropHandler(Array.from(e.target.files || []));
+    e.target.value = '';
+  });
+  dz.addEventListener('click', e => {
+    if (e.target === input) return;      // ignore the invisible input's own click
+    e.preventDefault();
+    e.stopPropagation();
+    pickFn();
+  }, true);
+
+  ['dragenter','dragover'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); dz.classList.add('drag');
+  }));
+  ['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); dz.classList.remove('drag');
+  }));
+  dz.addEventListener('drop', e => {
+    const files = Array.from(e.dataTransfer.files || []);
+    if (files.length) dropHandler(files);
+  });
+}
+function wireDropzone(dzSel, inputSel, handler) {
+  const dz = $(dzSel), input = $(inputSel);
+  if (!dz || !input) return;
+  input.addEventListener('change', e => handler(Array.from(e.target.files)));
+  ['dragenter','dragover'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); dz.classList.add('drag');
+  }));
+  ['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); dz.classList.remove('drag');
+  }));
+  dz.addEventListener('drop', e => handler(Array.from(e.dataTransfer.files)));
+}
+function readFileAsArrayBuffer(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result); r.onerror = rej;
+    r.readAsArrayBuffer(file);
+  });
+}
+
+function readFileAsText(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result); r.onerror = rej;
+    r.readAsText(file);
+  });
+}
+/* Return every sheet of a workbook as { name, rows }.
+   CSV files yield one pseudo-sheet named '(csv)'. */
+async function fileToSheetRows(file) {
+  const name = file.name.toLowerCase();
+  if (name.endsWith('.csv') || name.endsWith('.tsv')) {
+    const text = await readFileAsText(file);
+    return [{ name: '(csv)', rows: parseCSV(text) }];
+  }
+  const buf = await readFileAsArrayBuffer(file);
+  const wb  = XLSX.read(buf, { type: 'array', cellDates: true });
+  return wb.SheetNames.map(sn => ({
+    name: sn,
+    rows: XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true, defval: '' })
+  }));
+}
+
+/* Backwards-compat single-sheet reader (BOM folder loader + scrap file). */
+async function fileToRows(file) {
+  const sheets = await fileToSheetRows(file);
+  return sheets[0] ? sheets[0].rows : [];
+}
+
+/* Heuristic: does this sheet look like a batch sheet?
+   Requires a batch-ish column AND at least one data column. */
+function sheetLooksLikeBatch(rows) {
+  if (!rows || !rows.length) return false;
+  const header = (rows[0] || []).map(h => String(h || '').trim().toLowerCase());
+  const has = names => names.some(n => header.some(h => h === n || h.includes(n)));
+  return has(['batch'])
+      && has(['model', 'modelo', 'color', 'cantidad', 'quantity', 'qty',
+              'arrival', 'decanting', 'trim in', 'production', 'ship']);
+}
+
+/* Modal prompt. Resolves with an array of selected { name, rows }
+   or null if the user cancelled. */
+function promptSheetSelection(sheets, fileName) {
+  return new Promise(resolve => {
+    const modal = $('#sheetPickerModal');
+    if (!modal) { resolve(sheets); return; }          // graceful fallback
+
+    $('#sheetPickerFile').textContent = fileName;
+    const list = $('#sheetPickerList');
+    list.innerHTML = sheets.map((s, i) => {
+      const looksOk = sheetLooksLikeBatch(s.rows);
+      return `
+      <label class="sheet-pick-item">
+        <input type="checkbox" data-i="${i}" ${looksOk ? 'checked' : ''} />
+        <span class="sheet-name">
+          ${escapeHtml(s.name)}
+          ${looksOk ? '' : '<small class="sheet-badge">not batch-shaped</small>'}
+        </span>
+        <span class="sheet-dims">${s.rows.length} row${s.rows.length === 1 ? '' : 's'}</span>
+      </label>`;
+    }).join('');
+
+    const cleanup = () => {
+      modal.classList.add('hidden');
+      document.body.style.overflow = '';
+      $('#sheetPickerConfirm').onclick = null;
+      $('#sheetPickerClose').onclick   = null;
+      $('#sheetPickerAll').onclick     = null;
+      $('#sheetPickerNone').onclick    = null;
+      modal.onclick = null;
+    };
+
+    $('#sheetPickerAll').onclick  = () => list.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = true);
+    $('#sheetPickerNone').onclick = () => list.querySelectorAll('input[type=checkbox]').forEach(cb => cb.checked = false);
+
+    $('#sheetPickerConfirm').onclick = () => {
+      const picked = [];
+      list.querySelectorAll('input[type=checkbox]:checked').forEach(cb => {
+        picked.push(sheets[+cb.dataset.i]);
+      });
+      if (!picked.length) { alert('Please select at least one sheet.'); return; }
+      cleanup();
+      resolve(picked);
+    };
+
+    $('#sheetPickerClose').onclick = () => { cleanup(); resolve(null); };
+    modal.onclick = e => { if (e.target === modal) { cleanup(); resolve(null); } };
+
+    document.addEventListener('keydown', function esc(ev) {
+      if (ev.key === 'Escape') {
+        document.removeEventListener('keydown', esc);
+        cleanup(); resolve(null);
+      }
+    });
+
+    modal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+  });
+}
+
+function parseCSV(text) {
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const rows = []; let row = [], field = '', inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') { if (text[i+1] === '"') { field += '"'; i++; } else inQ = false; }
+      else field += c;
+    } else {
+      if (c === '"') inQ = true;
+      else if (c === ',') { row.push(field); field = ''; }
+      else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+      else if (c === '\r') {}
+      else field += c;
+    }
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+/* =========================================================
+   BOM FOLDER LOADER
+   ========================================================= */
+let _bomFolderHandle = null;
+let _bomFolderFiles  = [];
+
+function isBomFile(name) {
+  return /\.(xlsx|xls|csv)$/i.test(name);
+}
+function yieldToUI() {
+  return new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+}
+
+async function pickBomFolder() {
+  if (typeof window.showDirectoryPicker === 'function') {
+    try {
+      STATE.mrpStock.model      = '';
+      STATE.mrpStock.variantKey = '';
+      const handle = await window.showDirectoryPicker({ mode: 'read' });                     
+      _bomFolderHandle = handle;
+      await saveFileHandle('bomFolder', handle);
+      renderAllFileChips(); renderStoredFilesTab();
+      $('#bomFolderPath').value = '/' + handle.name + '/';
+      _bomFolderFiles = [];
+      $('#bomFolderInfo').textContent = 'Scanning folder…';
+      $('#bomFolderProcess').disabled = true;
+      await walkDirectory(handle, '');
+      updateFolderInfo();
+      return;
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      console.warn('showDirectoryPicker failed, falling back', e);
+    }
+  }
+  $('#bomFolderFallback').click();
+}
+
+async function walkDirectory(dirHandle, prefix) {
+  for await (const entry of dirHandle.values()) {
+    if (entry.kind === 'file') {
+      if (!isBomFile(entry.name)) continue;
+      const file = await entry.getFile();
+      _bomFolderFiles.push({ file, path: prefix + entry.name });
+    } else if (entry.kind === 'directory') {
+      if (entry.name.startsWith('.') || entry.name.startsWith('~')) continue;
+      await walkDirectory(entry, prefix + entry.name + '/');
+    }
+  }
+}
+
+function updateFolderInfo() {
+  const n = _bomFolderFiles.length;
+  $('#bomFolderInfo').textContent = n
+    ? `${n} BOM file${n===1?'':'s'} found — click “Process files”.`
+    : 'No BOM files found in that folder.';
+  $('#bomFolderProcess').disabled = n === 0;
+}
+
+async function processBomFolder() {
+  const files = _bomFolderFiles;
+  if (!files.length) return;
+
+  // Deterministic order — first file becomes BOM 1
+  files.sort((a, b) => a.path.localeCompare(b.path));
+
+  const wrap   = $('#bomProgressWrap');
+  const fill   = $('#bomProgressFill');
+  const label  = $('#bomProgressLabel');
+  const list   = $('#bomProgressList');
+  const toggle = $('#bomProgressToggle');
+
+  /* Show the panel; reset the summary + hide the file list & toggle */
+  wrap.classList.remove('hidden');
+  fill.style.width = '0%';
+  label.textContent = 'Preparing…';
+  list.classList.add('hidden');
+  toggle.classList.add('hidden');
+  toggle.textContent = '▸ Display batch list';
+
+  list.innerHTML = files.map((f, i) => `
+    <div class="progress-file" data-i="${i}">
+      <span class="pf-status pending">◌</span>
+      <span class="pf-name" title="${escapeHtml(f.path)}">${escapeHtml(f.path)}</span>
+      <span class="pf-note">waiting…</span>
+    </div>`).join('');
+
+  let ok = 0, fail = 0;
+
+  for (let i = 0; i < files.length; i++) {
+    const { file, path } = files[i];
+    const row = list.querySelector(`[data-i="${i}"]`);
+    const st  = row.querySelector('.pf-status');
+    const nt  = row.querySelector('.pf-note');
+
+    st.className = 'pf-status working';
+    st.textContent = '◐';
+    nt.textContent = 'parsing…';
+    row.classList.remove('fail-row');
+    label.textContent = `Parsing ${i+1} / ${files.length} — ${path}`;
+    await yieldToUI();
+
+    try {
+      const rows = await fileToRows(file);
+      const parsedList = parseBOM(rows, path);
+      STATE.mrpStock.model      = '';
+      STATE.mrpStock.variantKey = '';  
+      if (!parsedList.length) throw new Error('no parts found');
+
+      for (const parsed of parsedList) {
+        const key = bomKeyOf(parsed);
+        const existing = STATE.boms.findIndex(b => bomKeyOf(b) === key);
+        if (existing >= 0) STATE.boms.splice(existing, 1);
+        assignBomId(parsed);
+        STATE.boms.push(parsed);
+      }
+      const partCount = parsedList.reduce((a, p) => a + p.parts.length, 0);
+
+      st.className = 'pf-status done';
+      st.textContent = '✓';
+      nt.textContent = `${parsedList.length} BOM${parsedList.length===1?'':'s'}, ${partCount} parts`;
+      ok++;
+    } catch (e) {
+      console.error(e);
+      st.className = 'pf-status fail';
+      st.textContent = '✕';
+      nt.textContent = e.message || 'failed';
+      row.classList.add('fail-row');
+      fail++;
+    }
+    /* Live render: BOM List grows file-by-file. */
+    renderBomList();
+    fill.style.width = (((i + 1) / files.length) * 100).toFixed(1) + '%';
+    await yieldToUI();
+  }
+
+  /* Final summary — one line, with the toggle button */
+  label.textContent = `Done — ${ok} succeeded, ${fail} failed`;
+  toggle.classList.remove('hidden');
+  if (fail > 0) toggle.classList.add('has-errors');
+  /* Phase 2 — spec-wide re-analysis and renumbering. */
+  const idsChanged = reanalyseAllSpecs();
+  if (idsChanged > 0) {
+    showToast(`BOM IDs updated — ${idsChanged} batch${idsChanged === 1 ? '' : 'es'} renumbered after full spec analysis`);
+  }
+  rebuildPartIndex();
+  renderBomList(); renderBomTable(); populatePlanModels(); populatePartDatalist();
+  renderBatchTable(); renderBatchStats();
+  computeInventory(); renderInventoryTable(); renderPlanning();
+
+  if (typeof renderStockFeasibility === 'function') {
+    populateStockModelSelect();
+    populateStockBomSelect();
+    renderStockFeasibility();
+  }
+   
+}
+function bindFolderFallback() {
+  const inp = $('#bomFolderFallback');
+  if (!inp) return;
+  inp.addEventListener('change', e => {
+    const files = Array.from(e.target.files || []);
+    _bomFolderFiles = files
+      .filter(f => isBomFile(f.name))
+      .map(f => ({ file: f, path: f.webkitRelativePath || f.name }));
+    if (_bomFolderFiles.length) {
+      const first = _bomFolderFiles[0].path;
+      const root  = first.split('/')[0];
+      $('#bomFolderPath').value = '/' + root + '/';
+    } else {
+      $('#bomFolderPath').value = '';
+    }
+    updateFolderInfo();
+    e.target.value = '';
+  });
+}
+
+/* =========================================================
+   BOM
+   ========================================================= */
+async function handleBomFiles(files) {
+  const touchedSpecs = new Set();
+  for (const f of files) {
+    try {
+      const sheets = await fileToSheetRows(f);
+      STATE.mrpStock.model      = '';
+      STATE.mrpStock.variantKey = '';
+      let sheetsToProcess;
+      if (sheets.length === 1) {
+        sheetsToProcess = sheets;
+      } else {
+        const picked = await promptSheetSelection(sheets, f.name);
+        if (!picked) continue;                             // user cancelled this file
+        sheetsToProcess = picked;
+      }
+
+      for (const sheet of sheetsToProcess) {
+        const label = sheets.length === 1 ? f.name : `${f.name} :: ${sheet.name}`;
+        const parsedList = parseBOM(sheet.rows, label);
+        if (!parsedList.length) {
+          alert(`No parts found in ${label}`);
+          continue;
+        }
+        for (const parsed of parsedList) {
+          const key = bomKeyOf(parsed);
+          const existing = STATE.boms.findIndex(b => bomKeyOf(b) === key);
+          if (existing >= 0) STATE.boms.splice(existing, 1);
+          assignBomId(parsed);
+          STATE.boms.push(parsed);
+          touchedSpecs.add(specKeyOf(parsed.vehicleMatNo));
+        }
+      }
+    } catch (e) {
+      console.error(e);
+      alert(`Failed to parse ${f.name}: ${e.message}`);
+    }
+  }
+   /* Phase 2 — re-analyse only the touched specs. */
+  let idsChanged = 0;
+  for (const sk of touchedSpecs) idsChanged += reanalyseSpecBomIds(sk).changed;
+  if (idsChanged > 0) {
+    showToast(`BOM IDs updated — ${idsChanged} batch${idsChanged === 1 ? '' : 'es'} renumbered after full spec analysis`);
+  }  
+  rebuildPartIndex();
+  renderBomList(); renderBomTable(); populatePlanModels(); populatePartDatalist();
+  renderBatchTable(); renderBatchStats();
+  computeInventory(); renderInventoryTable(); renderPlanning();
+  if (typeof renderStockFeasibility === 'function') {
+    populateStockModelSelect();
+    populateStockBomSelect();
+    renderStockFeasibility();
+  } 
+}
+function parseBOM(rows, filename) {
+  if (!rows || !rows.length) throw new Error('Empty file');
+
+  let headerIdx = -1;
+  for (let i = 0; i < Math.min(rows.length, 20); i++) {
+    const joined = (rows[i] || []).map(c => String(c)).join('|');
+    if (joined.includes('Part NO') || joined.includes('Vehicle Matl')) { headerIdx = i; break; }
+  }
+  if (headerIdx === -1) throw new Error('Header row not found');
+
+  const headers     = (rows[headerIdx] || []).map(h => String(h || '').split('\n')[0].trim());
+  const headerLower = headers.map(h => h.toLowerCase());
+
+  const findCol = (hints, exact = false) => {
+    for (const h of hints) {
+      const hl = h.toLowerCase();
+      const i = headers.findIndex((_, idx) =>
+        exact ? headerLower[idx] === hl : headerLower[idx].includes(hl));
+      if (i >= 0) return i;
+    }
+    return -1;
+  };
+
+  let cVehMat = findCol(['vehicle matl', 'vehicle mat']); if (cVehMat < 0) cVehMat = 0;
+  let cVehDesc= findCol(['vehi. desc', 'vehicle desc', 'vehicle description']); if (cVehDesc < 0) cVehDesc = 1;
+  let cBatch  = findCol(['batch'], true);
+  if (cBatch < 0) cBatch = findCol(['sales batch', 'batch id']);
+  if (cBatch < 0) cBatch = 4;
+  let cPartNo = findCol(['part no']); if (cPartNo < 0) cPartNo = 9;
+  let cNameEN = findCol(['part name(en)', 'part name (en)', 'part name']); if (cNameEN < 0) cNameEN = 10;
+  let cQty    = findCol(['qty'], true);
+  if (cQty < 0) cQty = findCol(['quantity per', 'qty per']);
+  if (cQty < 0) cQty = 19;
+  let cUOM    = findCol(['uom'], true);
+  if (cUOM < 0) cUOM = findCol(['unit of measure', 'uom']);
+  if (cUOM < 0) cUOM = 20;
+
+  let cMWO = findCol(['mwo'], true);
+  if (cMWO < 0) cMWO = findCol(['mwo number', 'mwo no']);
+
+  const groups = new Map();
+  for (let i = headerIdx + 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || !r.length) continue;
+
+    const vehicleMatNo = String(r[cVehMat] || '').trim();
+    const batchId      = String(r[cBatch]  || '').trim();
+    const partNo       = String(r[cPartNo] || '').trim();
+    if (!vehicleMatNo && !batchId) continue;
+    if (!partNo) continue;
+
+    const qty = Number(String(r[cQty]).replace(/[^0-9.\-]/g, ''));
+    if (!qty || qty <= 0) continue;
+
+    const key = vehicleMatNo + '||' + batchId;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        id: crypto.randomUUID ? crypto.randomUUID() : (key + '|' + Date.now() + '|' + Math.random()),
+        vehicleMatNo,
+        vehicleDesc: String(r[cVehDesc] || '').trim(),
+        batchId,
+        parts: []
+      });
+    }
+    groups.get(key).parts.push({
+      partNo,
+      nameEN: String(r[cNameEN] ?? '').trim(),
+      nameCN: '',
+      qty,
+      uom:    String(r[cUOM] ?? '').trim(),
+      mwo:    cMWO >= 0 ? String(r[cMWO] ?? '').trim() : '',
+      supplier: '',
+      cpac: ''
+    });
+  }
+
+  const out = [];
+  for (const g of groups.values()) {
+    g.label = g.batchId || g.vehicleMatNo || filename;
+    out.push(g);
+  }
+  return out;
+}
+
+function rebuildPartIndex() {
+  const idx = {};
+  for (const bom of STATE.boms) {
+    const key = bomKeyOf(bom);
+    for (const p of bom.parts) {
+      if (!idx[p.partNo]) {
+        idx[p.partNo] = {
+          partNo: p.partNo, nameCN: p.nameCN, nameEN: p.nameEN,
+          uom: p.uom, supplier: p.supplier, cpac: p.cpac,
+          bomKeys: new Set(), perBomQty: {}
+        };
+      }
+      idx[p.partNo].bomKeys.add(key);
+      idx[p.partNo].perBomQty[key] = (idx[p.partNo].perBomQty[key] || 0) + p.qty;
+    }
+  }
+  const totalBoms = STATE.boms.length;
+  for (const p of Object.values(idx)) {
+    p.isCommon = p.bomKeys.size === totalBoms && totalBoms > 0;
+  }
+  STATE.partIndex = idx;
+}
+
+/* =========================================================
+   BOM LIST TREE
+   ========================================================= */
+function renderBomList() {
+  const wrap = $('#bomList');
+  if (!STATE.boms.length) {
+    wrap.innerHTML = '<div class="hint" style="margin:0">No BOMs loaded yet. Use the folder loader above to load BOM files.</div>';
+    return;
+  }
+
+  /* --- spec → family → bomId → colour → boms[] --- */
+  const specMap = new Map();
+  for (const b of STATE.boms) {
+    const sk  = specKeyOf(b.vehicleMatNo);
+    const fm  = matFamilyOf(b.vehicleMatNo);
+    const cc  = colorCodeOf(b.vehicleMatNo);
+    const bid = b.bomId || '(unassigned)';
+
+    if (!specMap.has(sk)) specMap.set(sk, { specKey: sk, families: new Map(), boms: [] });
+    const sg = specMap.get(sk);
+    sg.boms.push(b);
+
+    if (!sg.families.has(fm)) sg.families.set(fm, { familyKey: fm, bomIds: new Map(), boms: [] });
+    const fg = sg.families.get(fm);
+    fg.boms.push(b);
+
+    if (!fg.bomIds.has(bid)) fg.bomIds.set(bid, { bomId: bid, colors: new Map(), boms: [] });
+    const bg = fg.bomIds.get(bid);
+    bg.boms.push(b);
+
+    if (!bg.colors.has(cc)) bg.colors.set(cc, { colorCode: cc, boms: [] });
+    bg.colors.get(cc).boms.push(b);
+  }
+  for (const sg of specMap.values()) sg.specName = deriveSpecName(sg.boms);
+
+  wrap.innerHTML = Array.from(specMap.values()).map(sg => {
+    const specBomIds     = new Set(sg.boms.map(b => b.bomId));
+    const specBomCount   = specBomIds.size;
+    const specBatchCount = sg.boms.length;
+    const specFamCount   = sg.families.size;
+
+    const familyHtml = Array.from(sg.families.values())
+      .sort((a, b) => a.familyKey.localeCompare(b.familyKey))
+      .map(fg => {
+        const famBomIds   = new Set(fg.boms.map(b => b.bomId));
+        const famBomCount = famBomIds.size;
+        const famBatchCnt = fg.boms.length;
+
+        const bomGroupsHtml = Array.from(fg.bomIds.entries())
+          .sort((a, b) => {
+            const na = parseInt(String(a[0]).replace(/\D/g, ''), 10) || 0;
+            const nb = parseInt(String(b[0]).replace(/\D/g, ''), 10) || 0;
+            return na - nb;
+          })
+          .map(([bomId, bg]) => {
+            const rep        = bg.boms[0];
+            const partCount  = rep.parts.length;
+            const colorCount = bg.colors.size;
+            const batchCount = bg.boms.length;
+
+            const colorHtml = Array.from(bg.colors.values())
+              .sort((a, b) => String(a.colorCode).localeCompare(String(b.colorCode)))
+              .map(cg => {
+                const colorName = deriveColorName(cg.boms, sg.specName);
+                const repMatNo  = cg.boms[0].vehicleMatNo || '';
+                const batchItems = cg.boms
+                  .slice()
+                  .sort((a, b) => String(a.batchId || '').localeCompare(String(b.batchId || '')))
+                  .map(bomBatchItemHtml)
+                  .join('');
+                return `
+                  <details class="bom-color-group" open>
+                    <summary class="bom-color-header">
+                      <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
+                      ${colorName ? `<span class="color-name">${escapeHtml(colorName)}</span>` : ''}
+                      ${repMatNo ? `<span class="color-matno" title="Vehicle material number">${escapeHtml(repMatNo)}</span>` : ''}
+                      <span class="color-count">${cg.boms.length} batch${cg.boms.length === 1 ? '' : 'es'}</span>
+                    </summary>
+                    <div class="bom-batch-list">${batchItems}</div>
+                  </details>`;
+              }).join('');
+
+            return `
+              <div class="bom-id-group" data-bomid="${escapeHtml(bomId)}">
+                <div class="bom-id-header">
+                  <span class="bom-id-badge">${escapeHtml(bomId)}</span>
+                  <span class="bom-id-stats">
+                    ${colorCount} colour${colorCount === 1 ? '' : 's'} ·
+                    ${batchCount} batch${batchCount === 1 ? '' : 'es'} ·
+                    ${partCount} parts
+                  </span>
+                  <button class="btn tiny" data-role="bom-display" data-bomid="${escapeHtml(bomId)}">
+                    Display BOM
+                  </button>
+                </div>
+                <div class="bom-color-list">${colorHtml}</div>
+              </div>`;
+          }).join('');
+
+        return `
+          <details class="bom-matcode-group" open>
+            <summary class="bom-matcode-header">
+              <span class="bom-matcode-badge">${matFamilyBadgeHtml(fg.familyKey)}</span>
+              <span class="bom-matcode-count">
+                ${famBomCount} BOM${famBomCount === 1 ? '' : 's'} ·
+                ${famBatchCnt} batch${famBatchCnt === 1 ? '' : 'es'}
+              </span>
+            </summary>
+            <div class="bom-id-list">${bomGroupsHtml}</div>
+          </details>`;
+      }).join('');
+
+    return `
+      <details class="bom-spec-group" data-speckey="${escapeHtml(sg.specKey)}" open>
+        <summary class="bom-spec-header">
+          <span class="spec-name">${escapeHtml(sg.specName)}</span>
+          <span class="spec-count">
+            ${specFamCount} material code${specFamCount === 1 ? '' : 's'} ·
+            ${specBomCount} BOM${specBomCount === 1 ? '' : 's'} ·
+            ${specBatchCount} batch${specBatchCount === 1 ? '' : 'es'}
+          </span>
+          ${specBomCount > 1 ? `<button class="btn tiny" data-role="compare-boms" data-speckey="${escapeHtml(sg.specKey)}" data-specname="${escapeHtml(sg.specName)}" style="margin-left:auto;margin-right:12px">Compare BOMs</button>` : ''}
+        </summary>
+        <div class="bom-matcode-list">${familyHtml}</div>
+      </details>`;
+  }).join('');
+
+  wrap.querySelectorAll('button[data-role=bom-display]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      const specEl = btn.closest('.bom-spec-group');
+      const specKey = specEl.dataset.speckey;
+      openBomDisplay(btn.dataset.bomid, specKey);
+    });
+  });
+
+  if ($('#bomListSearch') && $('#bomListSearch').value) handleBomListSearch();
+}
+function bomBatchItemHtml(b) {
+  const bid = b.batchId || '—';
+  const cc  = colorCodeOf(b.vehicleMatNo) || '';
+  return `<span class="bom-batch-chip" data-batchid="${escapeHtml(b.batchId || '')}" data-colcode="${escapeHtml(cc)}" title="${escapeHtml(bid)}">${escapeHtml(bid)}</span>`;
+}
+
+/* =========================================================
+   BOM LIST — SEARCH & EXPAND / COLLAPSE
+   ========================================================= */
+function handleBomListSearch() {
+  const wrap      = $('#bomList');
+  const resultBox = $('#bomListSearchResult');
+  if (!wrap || !resultBox) return;
+
+  const q = ($('#bomListSearch').value || '').trim().toLowerCase();
+
+  wrap.querySelectorAll('.hidden-for-search').forEach(el => el.classList.remove('hidden-for-search'));
+  wrap.querySelectorAll('.bom-search-hit').forEach(el => el.classList.remove('bom-search-hit'));
+
+  if (!q) { resultBox.classList.add('hidden'); resultBox.innerHTML = ''; return; }
+
+  const hits = [];
+  wrap.querySelectorAll('.bom-spec-group').forEach(specEl => {
+    const specName = specEl.querySelector('.spec-name')?.textContent || '';
+    specEl.querySelectorAll('.bom-matcode-group').forEach(matEl => {
+      const matCode = matEl.querySelector('.bom-matcode-badge')?.textContent || '';
+      matEl.querySelectorAll('.bom-id-group').forEach(bomEl => {
+        const bomId = bomEl.querySelector('.bom-id-badge')?.textContent || '';
+        bomEl.querySelectorAll('.bom-color-group').forEach(colorEl => {
+          const cc    = colorEl.querySelector('.color-code')?.textContent || '';
+          const cn    = colorEl.querySelector('.color-name')?.textContent || '';
+          const matNo = colorEl.querySelector('.color-matno')?.textContent || '';
+          colorEl.querySelectorAll('.bom-batch-chip').forEach(chip => {
+            const bid = chip.dataset.batchid || '';
+            const hay = `${bid} ${cc} ${cn} ${matNo} ${matCode} ${bomId}`.toLowerCase();
+            if (hay.includes(q)) {
+              hits.push({ specName, matCode, bomId, cc, cn, matNo, bid,
+                          chipEl: chip, bomEl, colorEl, matEl, specEl });
+            }
+          });
+        });
+      });
+    });
+  });
+
+  wrap.querySelectorAll('.bom-spec-group, .bom-matcode-group, .bom-id-group, .bom-color-group, .bom-batch-chip')
+    .forEach(el => el.classList.add('hidden-for-search'));
+
+  for (const h of hits) {
+    h.chipEl.classList.remove('hidden-for-search');
+    h.chipEl.classList.add('bom-search-hit');
+    h.colorEl.classList.remove('hidden-for-search');
+    h.bomEl.classList.remove('hidden-for-search');
+    h.matEl.classList.remove('hidden-for-search');
+    h.specEl.classList.remove('hidden-for-search');
+    h.colorEl.open = true;
+  }
+
+  resultBox.classList.remove('hidden');
+  if (!hits.length) {
+    resultBox.innerHTML = `<div class="bom-search-empty">No match for “${escapeHtml(q)}”.</div>`;
+    return;
+  }
+
+  const rows = hits.map(h => `
+    <div class="bom-search-row">
+      <span class="bom-search-spec">${escapeHtml(h.specName)}</span>
+      <span class="bom-search-arrow">›</span>
+      <span class="bom-search-matcode">${matFamilyBadgeHtml(h.matCode)}</span>
+      <span class="bom-search-arrow">›</span>
+      <span class="bom-search-bomid bom-id-badge">${escapeHtml(h.bomId)}</span>
+      <span class="bom-search-arrow">›</span>
+      <span class="bom-search-color">
+        <span class="color-code" style="${colorBadgeStyle(h.cc)}">${escapeHtml(h.cc || '??')}</span>
+        ${h.cn ? `<span class="bom-search-color-name">${escapeHtml(h.cn)}</span>` : ''}
+      </span>
+      ${h.matNo ? `<span class="bom-search-matno">${escapeHtml(h.matNo)}</span>` : ''}
+      <span class="bom-search-arrow">›</span>
+      <span class="bom-search-batch">${escapeHtml(h.bid)}</span>
+    </div>`).join('');
+
+  resultBox.innerHTML = `
+    <div class="bom-search-summary">
+      <b>${hits.length}</b> match${hits.length === 1 ? '' : 'es'} for “${escapeHtml(q)}”
+    </div>
+    <div class="bom-search-rows">${rows}</div>`;
+}
+function expandAllBomList() {
+  document.querySelectorAll('#bomList details').forEach(d => { d.open = true; });
+}
+
+function collapseAllBomList() {
+  document.querySelectorAll('#bomList details').forEach(d => { d.open = false; });
+}
+
+function bindBomListSearch() {
+  const inp = $('#bomListSearch');
+  if (!inp) return;
+  inp.addEventListener('input', handleBomListSearch);
+  $('#bomListExpandAll')?.addEventListener('click', expandAllBomList);
+  $('#bomListCollapseAll')?.addEventListener('click', collapseAllBomList);
+}
+
+/* =========================================================
+   MATERIAL LIST
+   ========================================================= */
+function renderBomTable() {
+  const tbl  = $('#bomTable');
+  const q    = ($('#bomSearch').value || '').toLowerCase();
+  const mode = $('#bomFilter').value;
+
+  let rows = Object.values(STATE.partIndex);
+  let missingFromSearch = [];
+
+  // Handle Bulk Search Mode
+  if (STATE.bulkSearchList) {
+    const listSet = new Set(STATE.bulkSearchList);
+    rows = rows.filter(p => listSet.has(p.partNo));
+    
+    // Auto-expand all found parts
+    rows.forEach(p => WHERE_USED_OPEN.add(p.partNo));
+    
+    // Track missing items
+    missingFromSearch = STATE.bulkSearchList.filter(pn => !STATE.partIndex[pn]);
+  } else {
+    // Standard filter mode
+    rows = rows.filter(p => {
+      if (mode === 'common'   && !p.isCommon) return false;
+      if (mode === 'specific' &&  p.isCommon) return false;
+      if (q) {
+        const hay = `${p.partNo} ${p.nameEN} ${p.nameCN}`.toLowerCase();
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+  }
+
+  if (!rows.length) {
+    tbl.innerHTML = `<thead><tr><th>No material data</th></tr></thead>`;
+    return;
+  }
+
+  rows.sort((a, b) => a.partNo.localeCompare(b.partNo, undefined, { numeric: true }));
+
+  const head = `
+    <thead><tr>
+      <th class="c-type">Material Type</th>
+      <th class="c-partno">Material Number</th>
+      <th class="c-nameen">Material Description</th>
+      <th class="c-action">Where Used</th>
+    </tr></thead>`;
+  // Inject Bulk Search Controls into the table view
+  let bulkAlertHtml = '';
+  let bulkExportBtnHtml = '';
+  
+  if (STATE.bulkSearchList) {
+    bulkExportBtnHtml = `<button class="btn tiny primary" onclick="exportBulkWhereUsed()" style="margin-left:12px;">⤓ Export Search Results</button>`;
+    if (missingFromSearch.length > 0) {
+      bulkAlertHtml = `
+        <div class="hint" style="background:#fffbeb; border:1px solid #fde68a; padding:10px; border-radius:6px; margin-bottom:12px; color:#92400e;">
+          ⚠ <b>${missingFromSearch.length}</b> material(s) from your list were not found in master data: 
+          <span class="mono">${missingFromSearch.join(', ')}</span>
+        </div>`;
+    }
+    const clearBtn = `<button class="btn tiny ghost" onclick="clearBulkSearch()" style="margin-left:8px;">✕ Clear Bulk Search</button>`;
+    bulkAlertHtml = `<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px; background:#f0fdf4; padding:10px; border:1px solid #bbf7d0; border-radius:6px;">
+      <span style="color:#166534; font-size:13px;">Showing <b>${rows.length}</b> results from your bulk list.</span>
+      <div>${bulkExportBtnHtml}${clearBtn}</div>
+    </div>` + bulkAlertHtml;
+  }
+  const body = rows.map(p => {
+    const isOpen = WHERE_USED_OPEN.has(p.partNo);
+    const count  = p.bomKeys.size;
+
+    const mainRow = `
+      <tr class="mat-main-row ${isOpen ? 'row-open' : ''}" data-partno="${escapeHtml(p.partNo)}">
+        <td class="c-type">${p.isCommon
+          ? '<span class="pill common">COMMON</span>'
+          : `<span class="pill specific" title="${escapeHtml([...p.bomKeys].join(', '))}">SPECIFIC</span>`}</td>
+        <td class="c-partno" title="${escapeHtml(p.partNo)}">${escapeHtml(p.partNo)}</td>
+        <td class="c-nameen" title="${escapeHtml(p.nameEN || p.nameCN || '')}">${escapeHtml(p.nameEN || p.nameCN || '')}</td>
+        <td class="c-action">
+          <button class="btn tiny where-used-btn" data-partno="${escapeHtml(p.partNo)}">
+            ${isOpen ? '▾ Hide' : '▸ Where Used'} <span class="wu-count">${count}</span>
+          </button>
+        </td>
+      </tr>`;
+
+    if (!isOpen) return mainRow;
+
+    /* ---- Build spec → family → BOM ID → colour → batch chips with qty ---- */
+    const bomsForPart = Array.from(p.bomKeys)
+      .map(key => STATE.boms.find(b => bomKeyOf(b) === key))
+      .filter(Boolean);
+
+    const specMap = new Map();
+    for (const bom of bomsForPart) {
+      const sk  = specKeyOf(bom.vehicleMatNo);
+      const fm  = matFamilyOf(bom.vehicleMatNo);
+      const cc  = colorCodeOf(bom.vehicleMatNo);
+      const bid = bom.bomId || '(unassigned)';
+
+      if (!specMap.has(sk)) specMap.set(sk, { specKey: sk, families: new Map(), boms: [] });
+      const sg = specMap.get(sk);
+      sg.boms.push(bom);
+
+      if (!sg.families.has(fm)) sg.families.set(fm, { familyKey: fm, bomIds: new Map(), boms: [] });
+      const fg = sg.families.get(fm);
+      fg.boms.push(bom);
+
+      if (!fg.bomIds.has(bid)) fg.bomIds.set(bid, { bomId: bid, colors: new Map(), boms: [] });
+      const bg = fg.bomIds.get(bid);
+      bg.boms.push(bom);
+
+      if (!bg.colors.has(cc)) bg.colors.set(cc, { colorCode: cc, boms: [] });
+      bg.colors.get(cc).boms.push(bom);
+    }
+    for (const sg of specMap.values()) sg.specName = deriveSpecName(sg.boms);
+
+    /* ---- Render using the BOM List hierarchy classes ---- */
+    const specList = Array.from(specMap.values())
+      .sort((a, b) => a.specName.localeCompare(b.specName, undefined, { numeric: true }));
+
+    const specHtml = specList.map(sg => {
+      const specBomIds     = new Set(sg.boms.map(b => b.bomId));
+      const specBomCount   = specBomIds.size;
+      const specBatchCount = sg.boms.length;
+      const specFamCount   = sg.families.size;
+
+      const familyList = Array.from(sg.families.values())
+        .sort((a, b) => a.familyKey.localeCompare(b.familyKey));
+
+      const familyHtml = familyList.map(fg => {
+        const famBomIds   = new Set(fg.boms.map(b => b.bomId));
+        const famBomCount = famBomIds.size;
+        const famBatchCnt = fg.boms.length;
+
+        const bomIdList = Array.from(fg.bomIds.entries())
+          .sort((a, b) => {
+            const na = parseInt(String(a[0]).replace(/\D/g, ''), 10) || 0;
+            const nb = parseInt(String(b[0]).replace(/\D/g, ''), 10) || 0;
+            return na - nb;
+          });
+
+        const bomHtml = bomIdList.map(([bomId, bg]) => {
+          const rep        = bg.boms[0];
+          const partCount  = rep.parts.length;
+          const colorCount = bg.colors.size;
+          const batchCount = bg.boms.length;
+
+          const colorHtml = Array.from(bg.colors.values())
+            .sort((a, b) => String(a.colorCode).localeCompare(String(b.colorCode)))
+            .map(cg => {
+              const colorName = deriveColorName(cg.boms, sg.specName);
+              const repMatNo  = cg.boms[0].vehicleMatNo || '';
+              const batchChips = cg.boms
+                .slice()
+                .sort((a, b) => String(a.batchId || '').localeCompare(String(b.batchId || '')))
+                .map(bom => {
+                  const key = bomKeyOf(bom);
+                  const qty = p.perBomQty[key] || 0;
+                  const uom = p.uom || '';
+                  return `
+                    <span class="bom-batch-chip wu-chip" title="${escapeHtml(bom.batchId || '')}">
+                      ${escapeHtml(bom.batchId || '—')}
+                      <b class="wu-chip-qty">${fmt(qty)}</b>
+                      ${uom ? `<small class="wu-chip-uom">${escapeHtml(uom)}</small>` : ''}
+                    </span>`;
+                }).join('');
+              return `
+                <details class="bom-color-group" open>
+                  <summary class="bom-color-header">
+                    <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
+                    ${colorName ? `<span class="color-name">${escapeHtml(colorName)}</span>` : ''}
+                    ${repMatNo ? `<span class="color-matno" title="Vehicle material number">${escapeHtml(repMatNo)}</span>` : ''}
+                    <span class="color-count">${cg.boms.length} batch${cg.boms.length === 1 ? '' : 'es'}</span>
+                  </summary>
+                  <div class="bom-batch-list">${batchChips}</div>
+                </details>`;
+            }).join('');
+
+          return `
+            <div class="bom-id-group" data-bomid="${escapeHtml(bomId)}">
+              <div class="bom-id-header">
+                <span class="bom-id-badge">${escapeHtml(bomId)}</span>
+                <span class="bom-id-stats">
+                  ${colorCount} colour${colorCount === 1 ? '' : 's'} ·
+                  ${batchCount} batch${batchCount === 1 ? '' : 'es'} ·
+                  ${partCount} parts
+                </span>
+                <button class="btn tiny" data-role="wu-bom-display" data-bomid="${escapeHtml(bomId)}">
+                  Display BOM
+                </button>
+              </div>
+              <div class="bom-color-list">${colorHtml}</div>
+            </div>`;
+        }).join('');
+
+        return `
+          <details class="bom-matcode-group" open>
+            <summary class="bom-matcode-header">
+              <span class="bom-matcode-badge">${matFamilyBadgeHtml(fg.familyKey)}</span>
+              <span class="bom-matcode-count">
+                ${famBomCount} BOM${famBomCount === 1 ? '' : 's'} ·
+                ${famBatchCnt} batch${famBatchCnt === 1 ? '' : 'es'}
+              </span>
+            </summary>
+            <div class="bom-id-list">${bomHtml}</div>
+          </details>`;
+      }).join('');
+
+      return `
+        <details class="bom-spec-group" data-speckey="${escapeHtml(sg.specKey)}" open>
+          <summary class="bom-spec-header">
+            <span class="spec-name">${escapeHtml(sg.specName)}</span>
+            <span class="spec-count">
+              ${specFamCount} material code${specFamCount === 1 ? '' : 's'} ·
+              ${specBomCount} BOM${specBomCount === 1 ? '' : 's'} ·
+              ${specBatchCount} batch${specBatchCount === 1 ? '' : 'es'}
+            </span>
+            ${specBomCount > 1 ? `<button class="btn tiny" data-role="compare-boms" data-speckey="${escapeHtml(sg.specKey)}" data-specname="${escapeHtml(sg.specName)}" style="margin-left:auto;margin-right:12px">Compare BOMs</button>` : ''}
+          </summary>
+          <div class="bom-matcode-list">${familyHtml}</div>
+        </details>`;
+    }).join('');
+
+    return mainRow + `
+      <tr class="where-used-row">
+        <td colspan="4">
+          <div class="where-used-panel">
+            <div class="wu-title">
+              Used in <b>${bomsForPart.length}</b> vehicle batch${bomsForPart.length === 1 ? '' : 'es'}
+            </div>
+            ${specHtml}
+          </div>
+        </td>
+      </tr>`;
+  }).join('');
+
+    tbl.innerHTML = bulkAlertHtml + head + `<tbody>${body || '<tr><td colspan="4" style="text-align:center;padding:20px;color:var(--muted)">No materials found in master data.</td></tr>'}</tbody>`;
+
+  /* Wire the Where Used expand/collapse button */
+  tbl.querySelectorAll('.where-used-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const pn = btn.dataset.partno;
+      if (WHERE_USED_OPEN.has(pn)) WHERE_USED_OPEN.delete(pn);
+      else                          WHERE_USED_OPEN.add(pn);
+      renderBomTable();
+    });
+  });
+
+  /* Wire the Display BOM button inside the Where Used panel */
+  tbl.querySelectorAll('button[data-role=wu-bom-display]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      const specEl = btn.closest('.bom-spec-group');
+      const specKey = specEl.dataset.speckey;
+      openBomDisplay(btn.dataset.bomid, specKey);
+    });
+  });
+}
+function populatePlanModels() {
+  const sel = $('#planModel');
+  sel.innerHTML = STATE.boms.length
+    ? STATE.boms.map(b => `<option value="${escapeHtml(bomKeyOf(b))}">${escapeHtml(bomDisplayName(b))}</option>`).join('')
+    : '<option value="">— upload BOMs first —</option>';
+}
+
+function populatePartDatalist() {
+  const dl = $('#partList');
+  if (!dl) return;
+  dl.innerHTML = Object.keys(STATE.partIndex).sort()
+    .map(p => `<option value="${escapeHtml(p)}">`).join('');
+}
+
+/* =========================================================
+   BATCHES
+   ========================================================= */
+async function handleBatchFiles(files) {
+  const f = files[0];
+  if (!f) return;
+  try {
+    const sheets = await fileToSheetRows(f);
+
+    let sheetsToProcess;
+    if (sheets.length === 1) {
+      sheetsToProcess = sheets;
+    } else {
+      const picked = await promptSheetSelection(sheets, f.name);
+      if (!picked) return;                                // user cancelled
+      sheetsToProcess = picked;
+    }
+
+    /* Parse each sheet with its own header row, then merge batch objects. */
+    const allBatches = [];
+    const sheetsReport = [];
+    for (const sheet of sheetsToProcess) {
+      const parsed = parseBatches(sheet.rows);
+      /* Prefer the sheet's own name; fall back to the filename. */
+      const meta = parseLineMeta(sheet.name, f.name);
+
+      for (const b of parsed) {
+        b._line      = meta.line     || b._line      || '';
+        b._planYear  = meta.planYear || b._planYear  || '';
+        b._sheetName = sheet.name;
+      }       
+      sheetsReport.push({ name: sheet.name, count: parsed.length });
+      if (parsed.length) allBatches.push(...parsed);
+    }
+
+    if (!allBatches.length) {
+      alert(
+        'No valid batch rows found in the selected sheet(s).\n' +
+        'Each sheet needs a header with at least a "Batch" column and one of\n' +
+        'Model / Color / Quantity / Arrival / Decanting / Trim-in / Production.'
+      );
+      return;
+    }
+
+    /* Deduplicate by batch number (first occurrence wins). */
+    const seen = new Map();
+    for (const b of allBatches) {
+      if (!seen.has(b.batch)) seen.set(b.batch, b);
+    }
+    STATE.batches = Array.from(seen.values());
+    const lineSel = $('#batchLineFilter');
+    if (lineSel) lineSel.value = '';
+    populateBatchLineFilter();
+
+    STATE.batchView = { sorts: {}, filters: {} };
+    
+    BATCH_MODEL_COLLAPSED.clear();
+    BATCH_COLOR_COLLAPSED.clear(); 
+    BATCH_LINE_COLLAPSED.clear(); 
+    COMP_LINE_COLLAPSED.clear();
+    COMP_MODEL_COLLAPSED.clear();
+    COMP_COLOR_COLLAPSED.clear();
+     
+    classifyBatches();
+    renderBatchStats();
+    renderBatchTable();
+    computeInventory();
+    renderInventoryTable();
+    renderPlanning();
+
+    /* Non-blocking summary of what came from where. */
+    if (sheetsReport.length > 1) {
+      console.info(
+        'Batch file loaded — sheets processed:\n' +
+        sheetsReport.map(s => `  • ${s.name}: ${s.count} batch${s.count === 1 ? '' : 'es'}`).join('\n') +
+        `\nTotal unique batches: ${STATE.batches.length}`
+      );
+    }
+  } catch (e) {
+    console.error(e);
+    alert(`Failed to parse batch file: ${e.message}`);
+  }
+}
+
+/* Extract production line + planning year from sheet names or filenames.
+   Accepts "Production Order M1 - 2026", "M0 - 2025", "A0-2024", etc.
+   Prefers the "Production Order XXX - YYYY" pattern. */
+function parseLineMeta(...names) {
+  /* Pass 1 — most specific form: Production Order <code> - <yyyy> */
+  for (const nm of names) {
+    if (!nm) continue;
+    const m = String(nm).match(/Production\s+Order\s+([A-Z][0-9])\s*-\s*(\d{4})/i);
+    if (m) return { line: m[1].toUpperCase(), planYear: m[2] };
+  }
+  /* Pass 2 — relaxed form anywhere in the string */
+  for (const nm of names) {
+    if (!nm) continue;
+    const m = String(nm).match(/\b([A-Z][0-9])\s*-\s*(\d{4})\b/i);
+    if (m) return { line: m[1].toUpperCase(), planYear: m[2] };
+  }
+  return { line: '', planYear: '' };
+}
+
+function parseBatches(rows) {
+  if (!rows.length) return [];
+
+  /* ============ LINE A — header normalisation ============ */
+  /* Was: const header = rows[0].map(h => String(h||'').trim().toLowerCase());
+     Now: strips nbsp + zero-width space before lowercasing. */
+  const header = rows[0].map(h =>
+    String(h || '')
+      .replace(/\u00a0/g, ' ')
+      .replace(/\u200b/g, '')
+      .trim()
+      .toLowerCase()
+  );
+  /* ============ LINE B — idx() now accepts an exclude list ============ */
+  const idx = (names, exclude = []) => {
+    const isExcluded = i => exclude.includes(i);
+    for (const n of names) {
+      const i = header.findIndex((h, j) => !isExcluded(j) && h === n.toLowerCase());
+      if (i >= 0) return i;
+    }
+    for (const n of names) {
+      const i = header.findIndex((h, j) => !isExcluded(j) && h.includes(n.toLowerCase()));
+      if (i >= 0) return i;
+    }
+    return -1;
+  };
+
+  /* ============ LINE C — column map ============ */
+  /* 1. Resolve colorCode FIRST so we can exclude it from the color lookup.
+     2. Add 'colour code' and 'colour' as English-variant hints.
+     3. Resolve production date (some files use 'Production' as a date column;
+        others as a 'DONE' flag). We look for either a dedicated date column
+        OR reuse trimIn when Production is date-shaped. */
+  const colorCodeIdx = idx(['color code', 'colour code']);
+
+  const c = {
+    batch:      idx(['batch number', 'batch']),
+    model:      idx(['modelo', 'model']),
+    color:      idx(['color', 'colour','Colour code'], colorCodeIdx >= 0 ? [colorCodeIdx] : []),
+    qty:        idx(['cantidad', 'quantity', 'qty']),
+    trimIn:     idx(['trim in date','Production Date']),
+    ship:       idx(['name of ship', 'ship']),
+    week:       idx(['week']),
+    decanting:  idx(['decanting date']),
+    arrival:    idx(['arrival date', 'arrival']),
+    production: idx(['production']),           // still captured; may be text OR date
+    colorCode:  colorCodeIdx,
+    carroceria: idx(['batch carroceria']),
+    mwo:        idx(['mwo'])
+  };
+
+  /* ============ LINE D — per-row build ============ */
+  const out = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || !r.length) continue;
+
+    const model = String(r[c.model] || '').trim();
+    const batch = String(r[c.batch] || '').trim();
+    if (!model && !batch) continue;
+
+    const qtyRaw = c.qty >= 0 ? String(r[c.qty]).replace(/[^0-9.\-]/g, '') : '';
+    const qty    = Number(qtyRaw);
+
+    /* Raw values first */
+    const trimInRaw     = c.trimIn     >= 0 ? r[c.trimIn]     : '';
+    const productionRaw = c.production >= 0 ? r[c.production] : '';
+
+    /* Trim-in date: try the TRIM IN DATE column first, then fall back to
+       the Production column if it holds a date. */
+    let trimIn = parseDate(trimInRaw);
+    if (!trimIn) trimIn = parseDate(productionRaw);   // Production date = Trim-in date
+
+    /* Production text flag: keep whatever non-date value was in the cell
+       (e.g. "DONE"). If it was a date, blank it so the UI doesn't show a
+       duplicate date in the "Production" column. */
+    let productionText = String(productionRaw || '').trim();
+    if (parseDate(productionText)) productionText = 'DONE';   // date-shaped → treat as done
+
+    out.push({
+      batch, model,
+      color:      String(r[c.color] || '').trim(),
+      qty:        isNaN(qty) ? 0 : qty,
+      trimIn,
+      ship:       String(r[c.ship] || '').trim(),
+      week:       r[c.week],
+      decanting:  parseDate(r[c.decanting]),
+      arrival:    parseDate(r[c.arrival]),
+      production: productionText,
+      colorCode:  String(r[c.colorCode] || '').trim(),
+      carroceria: String(r[c.carroceria] || '').trim(),
+      mwo:        String(r[c.mwo] || '').trim(),
+      _stage: 'unassigned',
+      _warehouse: null
+    });
+  }
+  return out;
+}
+function parseDate(v) {
+  if (v == null || v === '') return null;
+  if (v instanceof Date) return isNaN(v) ? null : v;
+  const s = String(v).trim();
+  if (!s) return null;
+  if (/^\d+(\.\d+)?$/.test(s) && Number(s) > 20000 && Number(s) < 60000) {
+    return new Date(Math.round((Number(s) - 25569) * 86400 * 1000));
+  }
+  let m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (m) return new Date(+m[3], +m[1]-1, +m[2]);
+  m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return new Date(+m[1], +m[2]-1, +m[3]);
+  const d = new Date(s);
+  return isNaN(d) ? null : d;
+}
+
+/* =========================================================
+   CLASSIFY
+   ========================================================= */
+function classifyBatches() {
+  const t = today();
+  const defaultWh  = STATE.config.defaultWarehouseId || null;
+  const autoAssign = STATE.config.autoAssignDefaultWarehouse === true;
+
+  for (const b of STATE.batches) {
+    if (b.trimIn && b.trimIn < t && /^DONE$/i.test(b.production || '')) {
+      b._stage = 'consumed'; b._warehouse = null; continue;
+    }
+    if (b.arrival && b.arrival > t) {
+      b._stage = 'inTransit'; b._warehouse = null; continue;
+    }
+    if (b.decanting && b.decanting <= t) {
+      b._stage = 'factoryFloor'; b._warehouse = null; continue;
+    }
+    if (b.arrival && b.arrival <= t && (!b.decanting || b.decanting > t)) {
+      b._stage = 'warehouse';
+      if (autoAssign && !b._warehouse && defaultWh) b._warehouse = defaultWh;
+      continue;
+    }
+    b._stage = 'unassigned'; b._warehouse = null;
+  }
+}
+
+/* =========================================================
+   CONVERSION TABLE
+   ========================================================= */
+function resolveBomKeyForBatch(batch) {
+  if (!STATE.boms.length) return null;
+
+  if (batch.batch) {
+    const direct = STATE.boms.find(b => b.batchId === batch.batch);
+    if (direct) return bomKeyOf(direct);
+  }
+
+  const ct = STATE.config.conversionTable || [];
+  const modelo = (batch.model || '').toLowerCase();
+  const color  = (batch.color || '').toLowerCase();
+  let row = ct.find(r => (r.modelo||'').toLowerCase() === modelo && (r.color||'').toLowerCase() === color);
+  if (!row) row = ct.find(r => (r.modelo||'').toLowerCase() === modelo && (!r.color || !r.color.trim()));
+
+  if (row) {
+    let candidates = [];
+    if (row.vehicleMatNo) candidates = STATE.boms.filter(b => b.vehicleMatNo === row.vehicleMatNo);
+    if (!candidates.length && row.batchId) candidates = STATE.boms.filter(b => b.batchId === row.batchId);
+    if (candidates.length) return bomKeyOf(candidates[candidates.length - 1]);
+  }
+
+  const byDesc = STATE.boms.filter(b => b.vehicleDesc === batch.model);
+  if (byDesc.length) return bomKeyOf(byDesc[byDesc.length - 1]);
+
+  return null;
+}
+
+/* =========================================================
+   BATCH CELL VALUE HELPERS
+   ========================================================= */
+function getBatchCellValue(b, colId) {
+  switch (colId) {
+    case 'batch':      return b.batch || '';
+    case 'model':      return b.model || '';
+    case 'color':      return b.color || '';
+    case 'qty':        return b.qty || 0;
+    case 'ship':       return b.ship || '';
+    case 'arrival':    return b.arrival   ? isoDate(b.arrival)   : '';
+    case 'decanting':  return b.decanting ? isoDate(b.decanting) : '';
+    case 'trimIn':     return b.trimIn    ? isoDate(b.trimIn)    : '';
+    case 'production': return b.production || '';
+    case 'stage':      return b._stage || '';
+    case 'warehouse':  return b._warehouse || '';
+    case 'linkedBom':  return resolveBomKeyForBatch(b) || '';
+  }
+  return '';
+}
+function isoDate(d) {
+  if (!d) return '';
+  const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), dd = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${dd}`;
+}
+
+function getBatchCellLabel(b, colId) {
+  const v = getBatchCellValue(b, colId);
+  if (colId === 'stage') {
+    const s = STATE.config.stages[v];
+    return s ? s.label : v;
+  }
+  if (colId === 'warehouse') {
+    if (!v) return '—';
+    const w = STATE.config.warehouses.find(x => x.id === v);
+    return w ? w.name : v;
+  }
+  if (colId === 'arrival' || colId === 'decanting' || colId === 'trimIn') {
+    return v ? fmtDate(new Date(v + 'T00:00:00')) : '—';
+  }
+  if (colId === 'linkedBom') {
+    if (!v) return '—';
+    const bom = STATE.boms.find(b => bomKeyOf(b) === v);
+    return bom ? bomDisplayName(bom) : v;
+  }
+  if (colId === 'qty') return fmt(v);
+  return v === '' ? '—' : String(v);
+}
+
+function getUniqueValues(colId) {
+  const seen = new Map();
+  for (const b of STATE.batches) {
+    const key   = getBatchCellValue(b, colId);
+    const label = getBatchCellLabel(b, colId);
+    if (!seen.has(key)) seen.set(key, label);
+  }
+  return Array.from(seen.entries())
+    .map(([key, label]) => ({ key: String(key), label }))
+    .sort((a, b) => String(a.label).localeCompare(String(b.label), undefined, { numeric: true }));
+}
+
+/* =========================================================
+   BATCH STATS
+   ========================================================= */
+function renderBatchStats() {
+  const stages = STATE.config.stages;
+  const agg = {};
+  /* ---- Line chips ---- */
+  const chips = $('#batchLineChips');
+  if (chips) {
+    const lineAgg = new Map();
+    for (const b of STATE.batches) {
+      const line = b._line || '(no line)';
+      if (!lineAgg.has(line)) lineAgg.set(line, { count: 0, qty: 0 });
+      const a = lineAgg.get(line);
+      a.count += 1;
+      a.qty   += (b.qty || 0);
+    }
+    const sortedLines = Array.from(lineAgg.entries())
+      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+    const activeLine = ($('#batchLineFilter')?.value || '');
+    const allActive  = !activeLine;
+
+    chips.innerHTML =
+      `<button class="line-chip ${allActive ? 'active' : ''}" data-line="">
+         <span class="lc-name">All</span>
+         <span class="lc-count">${fmt(STATE.batches.length)} batches · ${fmt(STATE.batches.reduce((s,b)=>s+(b.qty||0),0))} veh</span>
+       </button>` +
+      sortedLines.map(([l, a]) => `
+        <button class="line-chip ${activeLine === l ? 'active' : ''}" data-line="${escapeHtml(l)}">
+          <span class="lc-name">${escapeHtml(l)}</span>
+          <span class="lc-count">${fmt(a.count)} batches · ${fmt(a.qty)} veh</span>
+        </button>`).join('');
+
+    chips.querySelectorAll('.line-chip').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const sel = $('#batchLineFilter');
+        if (sel) sel.value = btn.dataset.line || '';
+        renderBatchStats();
+        renderBatchTable();
+      });
+    });
+  }   
+  for (const b of STATE.batches) {
+    if (!agg[b._stage]) agg[b._stage] = { count: 0, qty: 0, byModel: {} };
+    agg[b._stage].count += 1;
+    agg[b._stage].qty   += (b.qty || 0);
+    const m = b.model || '—';
+    if (!agg[b._stage].byModel[m]) agg[b._stage].byModel[m] = { count: 0, qty: 0 };
+    agg[b._stage].byModel[m].count += 1;
+    agg[b._stage].byModel[m].qty   += (b.qty || 0);
+  }
+  const totalCount = STATE.batches.length;
+  const totalQty   = STATE.batches.reduce((a,b) => a + (b.qty||0), 0);
+
+  const rules = {
+    inTransit:    'Arrival Date is in the future',
+    warehouse:    'Arrived, not yet decanted',
+    factoryFloor: 'Decanting Date already passed',
+    edgeLine:     'Manual stage',
+    consumed:     'TRIM IN DATE in the past and Production = DONE'
+  };
+
+  function breakdownHtml(byModel) {
+    const entries = Object.entries(byModel || {})
+      .sort((a,b) => b[1].qty - a[1].qty);
+    if (!entries.length) return '';
+    return `<div class="byModel">
+      ${entries.map(([m, v]) => `
+        <div class="byModel-row">
+          <span class="m-name" title="${escapeHtml(m)}">${escapeHtml(shorten(m, 22))}</span>
+          <span class="m-val">${fmt(v.qty)} <small>v · ${v.count} b</small></span>
+        </div>
+      `).join('')}
+    </div>`;
+  }
+
+  $('#batchStats').innerHTML = `
+    <div class="stat">
+      <div class="label">All batches</div>
+      <div class="value">${fmt(totalQty)}<span class="unit">vehicles</span></div>
+      <div class="sub"><b>${fmt(totalCount)}</b> batches total</div>
+    </div>
+    ${Object.entries(stages).map(([k, s]) => {
+      const a = agg[k] || { count:0, qty:0, byModel:{} };
+      return `
+        <div class="stat" title="${escapeHtml(rules[k]||'')}">
+          <div class="label">
+            <span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span>
+          </div>
+          <div class="value">${fmt(a.qty)}<span class="unit">vehicles</span></div>
+          <div class="sub"><b>${fmt(a.count)}</b> batches</div>
+          ${breakdownHtml(a.byModel)}
+        </div>`;
+    }).join('')}
+    <div class="stat" title="Could not be classified automatically — missing dates">
+      <div class="label">Unassigned</div>
+      <div class="value">${fmt((agg.unassigned||{}).qty||0)}<span class="unit">vehicles</span></div>
+      <div class="sub"><b>${fmt((agg.unassigned||{}).count||0)}</b> batches</div>
+      ${breakdownHtml((agg.unassigned||{}).byModel)}
+    </div>
+  `;
+}
+
+/* =========================================================
+   BATCH TABLE
+   ========================================================= */
+function renderBatchTable() {
+  const tree = $('#batchTable');
+  if (!STATE.batches.length) {
+    tree.innerHTML = '<div class="hint" style="margin:0">No batch data</div>';
+    return;
+  }
+
+  const searchText = ($('#batchSearch').value || '').trim().toLowerCase();
+  const lineFilter = ($('#batchLineFilter')?.value || '').trim();
+
+  /* --- 1. Column filters --- */
+  let list = STATE.batches.map((b, i) => ({ b, i }));
+  for (const [colId, allowedSet] of Object.entries(STATE.batchView.filters)) {
+    if (!allowedSet) continue;
+    list = list.filter(({ b }) => allowedSet.has(String(getBatchCellValue(b, colId))));
+  }
+
+  /* --- 2. Line dropdown filter --- */
+  if (lineFilter) {
+    list = list.filter(({ b }) => (b._line || '(no line)') === lineFilter);
+  }
+
+  /* --- 3. Text search (now includes line) --- */
+  if (searchText) {
+    list = list.filter(({ b }) => {
+      const hay = `${b.batch} ${b.model} ${b.color} ${b._line || ''} ${b.ship} ${b.production}`.toLowerCase();
+      return hay.includes(searchText);
+    });
+  }
+
+  /* --- 4. Group: line → model → colour → batches --- */
+  const lineMap = new Map();
+  for (const item of list) {
+    const b = item.b;
+    const line  = b._line || '(no line)';
+    const model = b.model || '(no model)';
+    const color = b.color || '(no colour)';
+    const cc    = b.colorCode || '';
+
+    if (!lineMap.has(line)) lineMap.set(line, new Map());
+    const modelMap = lineMap.get(line);
+
+    if (!modelMap.has(model)) modelMap.set(model, new Map());
+    const colorMap = modelMap.get(model);
+
+    const ckey = color + '||' + cc;
+    if (!colorMap.has(ckey)) colorMap.set(ckey, { color, colorCode: cc, rows: [] });
+    colorMap.get(ckey).rows.push(item);
+  }
+
+  const sortedLines = Array.from(lineMap.entries())
+    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+  /* --- 5. Sort helper --- */
+  const sortCol = Object.keys(STATE.batchView.sorts)[0] || '';
+  const sortDir = sortCol && STATE.batchView.sorts[sortCol] === 'desc' ? -1 : 1;
+  const applySortToRows = (rows) => {
+    const out = rows.slice();
+    if (sortCol && sortCol !== 'model' && sortCol !== 'color') {
+      out.sort((x, y) => {
+        const a = getBatchCellValue(x.b, sortCol);
+        const b = getBatchCellValue(y.b, sortCol);
+        if (sortCol === 'qty') return ((Number(a) || 0) - (Number(b) || 0)) * sortDir;
+        return String(a).localeCompare(String(b), undefined, { numeric: true }) * sortDir;
+      });
+    } else {
+      out.sort((x, y) => x.b.batch.localeCompare(y.b.batch, undefined, { numeric: true }));
+    }
+    return out;
+  };
+
+  /* --- 6. Visible columns --- */
+  const visibleCols = BATCH_COLS.filter(c => c.id !== 'model' && c.id !== 'color');
+
+  /* --- 7. Render 4-level tree --- */
+  let html = '';
+  for (const [line, modelMap] of sortedLines) {
+    /* Aggregate per line */
+    const lineRows = [];
+    for (const colorMap of modelMap.values())
+      for (const cg of colorMap.values())
+        lineRows.push(...cg.rows);
+    const lineQty       = lineRows.reduce((s, it) => s + (it.b.qty || 0), 0);
+    const lineModelCnt  = modelMap.size;
+    const lineYearSet   = new Set();
+    for (const it of lineRows) if (it.b._planYear) lineYearSet.add(it.b._planYear);
+    const lineYears     = Array.from(lineYearSet).sort().join(', ');
+
+    const lineOpen = !BATCH_LINE_COLLAPSED.has(line);
+
+    html += `<details class="prod-line-group batch-line-group"
+                     data-line="${escapeHtml(line)}"
+                     ${lineOpen ? 'open' : ''}>
+      <summary class="prod-line-header">
+        <span class="line-name">${escapeHtml(line)}</span>
+        <span class="line-count">
+          ${lineYears ? `<b>${escapeHtml(lineYears)}</b> · ` : ''}
+          ${lineModelCnt} model${lineModelCnt === 1 ? '' : 's'} ·
+          ${lineRows.length} batch${lineRows.length === 1 ? '' : 'es'} ·
+          ${fmt(lineQty)} vehicles
+        </span>
+      </summary>
+      <div class="prod-spec-list">`;
+
+    const sortedModelEntries = Array.from(modelMap.entries())
+      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+    for (const [model, colorMap] of sortedModelEntries) {
+      const modelRows = Array.from(colorMap.values()).flatMap(c => c.rows);
+      const modelQty  = modelRows.reduce((s, it) => s + (it.b.qty || 0), 0);
+      const modelKey  = line + '||' + model;
+      const modelOpen = !BATCH_MODEL_COLLAPSED.has(modelKey);
+
+      html += `<details class="prod-spec-group batch-model-group"
+                       data-line="${escapeHtml(line)}"
+                       data-model="${escapeHtml(model)}"
+                       ${modelOpen ? 'open' : ''}>
+        <summary class="prod-spec-header">
+          <span class="spec-name">${escapeHtml(model)}</span>
+          <span class="spec-count">
+            ${modelRows.length} batch${modelRows.length === 1 ? '' : 'es'} ·
+            ${colorMap.size} colour${colorMap.size === 1 ? '' : 's'} ·
+            ${fmt(modelQty)} vehicles
+          </span>
+        </summary>
+        <div class="prod-color-list">`;
+
+      const sortedColorEntries = Array.from(colorMap.entries())
+        .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+      for (const [ckey, cg] of sortedColorEntries) {
+        const colorQty  = cg.rows.reduce((s, it) => s + (it.b.qty || 0), 0);
+        const colorKey  = line + '||' + model + '||' + ckey;
+        const colorOpen = !BATCH_COLOR_COLLAPSED.has(colorKey);
+
+        html += `<details class="prod-color-group batch-color-group"
+                         data-line="${escapeHtml(line)}"
+                         data-model="${escapeHtml(model)}"
+                         data-color="${escapeHtml(ckey)}"
+                         ${colorOpen ? 'open' : ''}>
+          <summary class="prod-color-header">
+            <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
+            <span class="color-name">${escapeHtml(model)} ${escapeHtml(cg.color)}</span>
+            <span class="color-count">
+              ${cg.rows.length} batch${cg.rows.length === 1 ? '' : 'es'} ·
+              ${fmt(colorQty)} vehicles
+            </span>
+          </summary>
+          <div class="prod-batch-list">
+            <table class="prod-batch-inner-table">
+              <thead>
+                <tr>
+                  ${visibleCols.map(col => {
+                    const cls = [
+                      'col-head',
+                      col.num ? 'num' : '',
+                      STATE.batchView.filters[col.id] ? 'filtered' : '',
+                      STATE.batchView.sorts[col.id]   ? 'sorted'   : ''
+                    ].filter(Boolean).join(' ');
+                    const mark = STATE.batchView.sorts[col.id] === 'asc' ? '▲'
+                               : STATE.batchView.sorts[col.id] === 'desc' ? '▼' : '';
+                    return `<th class="${cls}" data-col="${col.id}">
+                      ${escapeHtml(col.label)}${mark ? `<span class="sort-mark">${mark}</span>` : ''}
+                      <button class="filter-btn" data-col="${col.id}" title="Sort / filter">▾</button>
+                    </th>`;
+                  }).join('')}
+                </tr>
+              </thead>
+              <tbody>`;
+
+        const rows = applySortToRows(cg.rows);
+
+        for (const { b, i } of rows) {
+          const s = STATE.config.stages[b._stage] || { label: b._stage, color: '#9ca3af' };
+
+          const linkedKey  = resolveBomKeyForBatch(b);
+          const linkedBom  = linkedKey ? STATE.boms.find(x => bomKeyOf(x) === linkedKey) : null;
+
+          let linkCell;
+          if (linkedBom) {
+            const bomId    = linkedBom.bomId || '(unassigned)';
+            const fullName = bomDisplayName(linkedBom);
+            linkCell = `<button class="btn tiny" data-role="batch-bom-display"
+                                data-bomid="${escapeHtml(bomId)}"
+                                title="${escapeHtml(fullName)}">
+                          ${escapeHtml(bomId)}
+                        </button>`;
+          } else if (b.model) {
+            linkCell = `<span class="pill warn" title="No BOM match — check conversion table">⚠ no link</span>`;
+          } else {
+            linkCell = '—';
+          }
+
+          const isUnassignedNoDate = b._stage === 'unassigned' && !b.arrival;
+          const unassignedFlag = isUnassignedNoDate
+            ? `<span class="pill warn" title="No Arrival Date — cannot be classified" style="margin-left:6px">⚠</span>`
+            : '';
+
+          const whLabel = b._warehouse
+            ? (STATE.config.warehouses.find(w => w.id === b._warehouse)?.name || b._warehouse)
+            : '—';
+
+          const cells = {
+            batch:      `<td>${escapeHtml(b.batch)}${unassignedFlag}</td>`,
+            qty:        `<td class="num">${fmt(b.qty)}</td>`,
+            ship:       `<td>${escapeHtml(b.ship)}</td>`,
+            arrival:    `<td>${b.arrival   ? fmtDate(b.arrival)   : '—'}</td>`,
+            decanting:  `<td>${b.decanting ? fmtDate(b.decanting) : '—'}</td>`,
+            trimIn:     `<td>${b.trimIn    ? fmtDate(b.trimIn)    : '—'}</td>`,
+            production: `<td>${escapeHtml(b.production)}</td>`,
+            stage:      `<td><span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span></td>`,
+            warehouse:  `<td>${b._stage === 'warehouse'
+                          ? `<select data-role="wh" data-i="${i}">
+                               <option value="">—</option>
+                               ${STATE.config.warehouses.map(w =>
+                                 `<option value="${w.id}" ${b._warehouse===w.id?'selected':''}>${escapeHtml(w.name)}</option>`
+                               ).join('')}
+                             </select>`
+                          : escapeHtml(whLabel)}</td>`,
+            linkedBom:  `<td>${linkCell}</td>`
+          };
+
+          html += `<tr data-i="${i}">${visibleCols.map(c => cells[c.id] || '<td></td>').join('')}</tr>`;
+        }
+
+        html += `</tbody></table></div></details>`;
+      }
+
+      html += `</div></details>`;
+    }
+
+    html += `</div></details>`;
+  }
+
+  tree.innerHTML = html;
+
+  /* --- 8. Wire interactions --- */
+  tree.querySelectorAll('.filter-btn').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      openFilterPopup(btn.dataset.col, btn);
+    });
+  });
+
+  tree.querySelectorAll('select[data-role=wh]').forEach(sel => {
+    sel.addEventListener('change', e => {
+      const i = +e.target.dataset.i;
+      STATE.batches[i]._warehouse = e.target.value || null;
+      computeInventory(); renderInventoryTable(); renderPlanning();
+    });
+  });
+
+  tree.querySelectorAll('button[data-role=batch-bom-display]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      e.preventDefault();
+      const tr = btn.closest('tr[data-i]');
+      const i  = tr ? +tr.dataset.i : -1;
+      if (i >= 0 && STATE.batches[i]) {
+        const batch = STATE.batches[i];
+        const cc = batch.colorCode || '';
+        const linkedKey = resolveBomKeyForBatch(batch);
+        const linkedBom = linkedKey ? STATE.boms.find(x => bomKeyOf(x) === linkedKey) : null;
+        const sk = linkedBom ? specKeyOf(linkedBom.vehicleMatNo) : '';
+        openBomDisplay(btn.dataset.bomid, sk, cc);
+      }
+    });
+  });
+  /* --- 9. Persist collapse state --- */
+  tree.querySelectorAll('details.batch-line-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.line;
+      if (d.open) BATCH_LINE_COLLAPSED.delete(key);
+      else        BATCH_LINE_COLLAPSED.add(key);
+    });
+  });
+
+  tree.querySelectorAll('details.batch-model-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.line + '||' + d.dataset.model;
+      if (d.open) BATCH_MODEL_COLLAPSED.delete(key);
+      else        BATCH_MODEL_COLLAPSED.add(key);
+    });
+  });
+
+  tree.querySelectorAll('details.batch-color-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.line + '||' + d.dataset.model + '||' + d.dataset.color;
+      if (d.open) BATCH_COLOR_COLLAPSED.delete(key);
+      else        BATCH_COLOR_COLLAPSED.add(key);
+    });
+  });
+}
+function batchExpandAll() {
+  BATCH_LINE_COLLAPSED.clear();
+  BATCH_MODEL_COLLAPSED.clear();
+  BATCH_COLOR_COLLAPSED.clear();
+  if (STATE.batches.length) renderBatchTable();
+}
+function batchCollapseAll() {
+  if (!STATE.batches.length) return;
+  const lines = new Set();
+  for (const b of STATE.batches) {
+    const line  = b._line  || '(no line)';
+    const model = b.model  || '(no model)';
+    const color = b.color  || '(no colour)';
+    const cc    = b.colorCode || '';
+
+    lines.add(line);
+    BATCH_MODEL_COLLAPSED.add(line + '||' + model);
+    BATCH_COLOR_COLLAPSED.add(line + '||' + model + '||' + color + '||' + cc);
+  }
+  for (const l of lines) BATCH_LINE_COLLAPSED.add(l);
+  renderBatchTable();
+}
+/* =========================================================
+   FILTER POPUP
+   ========================================================= */
+function bindFilterPopupGlobal() {
+  document.addEventListener('click', e => {
+    const popup = $('#filterPopup');
+    if (popup.classList.contains('hidden')) return;
+    if (popup.contains(e.target)) return;
+    if (e.target.closest('.filter-btn')) return;
+    closeFilterPopup();
+  });
+  window.addEventListener('scroll', closeFilterPopup, true);
+  window.addEventListener('resize', closeFilterPopup);
+}
+
+function closeFilterPopup() {
+  const popup = $('#filterPopup');
+  popup.classList.add('hidden');
+  popup.innerHTML = '';
+  popup._workingSet = null;
+  popup._search = '';
+}
+
+function openFilterPopup(colId, anchor) {
+  const popup = $('#filterPopup');
+  popup.dataset.col = colId;
+  const existingFilter = STATE.batchView.filters[colId];
+  popup._workingSet = existingFilter ? new Set(existingFilter) : null;
+  popup._search = '';
+  popup.classList.remove('hidden');
+  positionPopup(popup, anchor);
+  paintFilterPopup(colId);
+}
+
+function positionPopup(popup, anchor) {
+  const r = anchor.getBoundingClientRect();
+  const pw = 270, ph = 420;
+  let left = r.right - pw;
+  if (left < 8) left = 8;
+  if (left + pw > window.innerWidth - 8) left = window.innerWidth - pw - 8;
+
+  let top = r.bottom + 6;
+  if (top + ph > window.innerHeight - 8) {
+    top = Math.max(8, r.top - ph - 6);
+  }
+  popup.style.left = left + 'px';
+  popup.style.top  = top + 'px';
+}
+
+function paintFilterPopup(colId) {
+  const popup = $('#filterPopup');
+  const col = BATCH_COLS.find(c => c.id === colId);
+  const allValues = getUniqueValues(colId);
+
+  let ascLabel = '↑ Sort A → Z';
+  let descLabel = '↓ Sort Z → A';
+  if (col && col.date) { ascLabel = '↑ Sort oldest → newest'; descLabel = '↓ Sort newest → oldest'; }
+  else if (col && col.num) { ascLabel = '↑ Sort low → high'; descLabel = '↓ Sort high → low'; }
+
+  const currentSort = STATE.batchView.sorts[colId];
+  const search = (popup._search || '').toLowerCase();
+  const working = popup._workingSet;
+  const visible = allValues.filter(v => !search || v.label.toLowerCase().includes(search));
+
+  const valuesHtml = visible.length
+    ? visible.map(v => {
+        const checked = working === null ? true : working.has(v.key);
+        return `<label class="fp-value">
+          <input type="checkbox" data-key="${escapeHtml(v.key)}" ${checked ? 'checked' : ''}/>
+          <span title="${escapeHtml(v.label)}">${escapeHtml(v.label)}</span>
+        </label>`;
+      }).join('')
+    : `<div class="hint" style="margin:6px">No values</div>`;
+
+  popup.innerHTML = `
+    <div class="fp-sort">
+      <button data-sort="asc"  class="${currentSort==='asc'?'primary':''}">${ascLabel}</button>
+      <button data-sort="desc" class="${currentSort==='desc'?'primary':''}">${descLabel}</button>
+      ${currentSort ? `<button data-sort="none" class="ghost">✕ Clear sort on this column</button>` : ''}
+    </div>
+    <div class="fp-search">
+      <input type="text" id="fpSearchInput" placeholder="Search values…" value="${escapeHtml(popup._search||'')}"/>
+    </div>
+    <div class="fp-values" id="fpValues">${valuesHtml}</div>
+    <div class="fp-actions">
+      <button data-act="all">All</button>
+      <button data-act="none">None</button>
+      <button data-act="apply" class="primary">Apply</button>
+    </div>
+  `;
+
+  popup.querySelectorAll('.fp-sort button').forEach(b => {
+    b.addEventListener('click', e => {
+      e.stopPropagation();
+      const s = b.dataset.sort;
+      if (s === 'none') delete STATE.batchView.sorts[colId];
+      else              STATE.batchView.sorts[colId] = s;
+      closeFilterPopup();
+      renderBatchTable();
+    });
+  });
+
+  const si = popup.querySelector('#fpSearchInput');
+  si.addEventListener('input', e => {
+    popup._search = e.target.value;
+    const currentChecked = new Set();
+    popup.querySelectorAll('.fp-value input[type=checkbox]:checked').forEach(c => currentChecked.add(c.dataset.key));
+    const currentAll = popup.querySelectorAll('.fp-value input[type=checkbox]').length;
+    if (currentChecked.size === currentAll) popup._workingSet = null;
+    else popup._workingSet = currentChecked;
+
+    paintFilterPopup(colId);
+    const newSi = $('#filterPopup #fpSearchInput');
+    if (newSi) { newSi.focus(); newSi.setSelectionRange(newSi.value.length, newSi.value.length); }
+  });
+  si.addEventListener('click', e => e.stopPropagation());
+
+  popup.querySelectorAll('.fp-value input[type=checkbox]').forEach(cb => {
+    cb.addEventListener('change', e => {
+      e.stopPropagation();
+      if (popup._workingSet === null) {
+        popup._workingSet = new Set(allValues.map(v => v.key));
+      }
+      if (cb.checked) popup._workingSet.add(cb.dataset.key);
+      else            popup._workingSet.delete(cb.dataset.key);
+    });
+  });
+  popup.querySelectorAll('.fp-value').forEach(lbl => {
+    lbl.addEventListener('click', e => e.stopPropagation());
+  });
+
+  popup.querySelectorAll('.fp-actions button').forEach(b => {
+    b.addEventListener('click', e => {
+      e.stopPropagation();
+      const act = b.dataset.act;
+      if (act === 'all') {
+        popup._workingSet = null;
+        popup.querySelectorAll('.fp-value input[type=checkbox]').forEach(c => c.checked = true);
+      } else if (act === 'none') {
+        popup._workingSet = new Set();
+        popup.querySelectorAll('.fp-value input[type=checkbox]').forEach(c => c.checked = false);
+      } else if (act === 'apply') {
+        if (popup._workingSet === null) delete STATE.batchView.filters[colId];
+        else if (popup._workingSet.size === 0) STATE.batchView.filters[colId] = new Set();
+        else STATE.batchView.filters[colId] = new Set(popup._workingSet);
+        closeFilterPopup();
+        renderBatchTable();
+      }
+    });
+  });
+}
+
+/* =========================================================
+   SCRAP
+   ========================================================= */
+function bindScrapForm() {
+  $('#scrapAdd').addEventListener('click', () => {
+    const partNo    = ($('#scrapPart').value || '').trim();
+    const qty       = Number($('#scrapQty').value);
+    const ubication = ($('#scrapUbi').value || '').trim();
+    const note      = ($('#scrapNote').value || '').trim();
+    if (!partNo) { alert('Enter a Part No.'); return; }
+    if (!qty || qty <= 0) { alert('Enter a positive quantity.'); return; }
+    if (!STATE.partIndex[partNo]) {
+      if (!confirm(`Part "${partNo}" is not in any uploaded BOM. Add anyway?`)) return;
+    }
+    STATE.scrap.push({
+      id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()+Math.random()),
+      partNo, qty, ubication, note,
+      date: new Date().toISOString()
+    });
+    savePersistedScrap();
+    $('#scrapPart').value = '';
+    $('#scrapQty').value  = '';
+    $('#scrapUbi').value  = '';
+    $('#scrapNote').value = '';
+    renderScrapList();
+    renderInventoryTable();
+    renderPlanning();
+  });
+
+  $('#scrapUploadBtn').addEventListener('click', () => $('#scrapFile').click());
+  $('#scrapFile').addEventListener('change', async e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    try {
+      const rows = await fileToRows(f);
+      const added = parseScrapFile(rows);
+      if (!added) { alert('No valid scrap rows found.'); return; }
+      savePersistedScrap();
+      renderScrapList();
+      renderInventoryTable();
+      renderPlanning();
+      alert(`Imported ${added} scrap row${added===1?'':'s'}.`);
+    } catch (err) {
+      console.error(err);
+      alert(`Failed to parse scrap file: ${err.message}`);
+    }
+    e.target.value = '';
+  });
+}
+
+function parseScrapFile(rows) {
+  if (!rows.length) return 0;
+  const header = rows[0].map(h => String(h||'').trim().toLowerCase());
+  const idx = names => {
+    for (const n of names) {
+      const i = header.findIndex(h => h === n.toLowerCase());
+      if (i >= 0) return i;
+    }
+    for (const n of names) {
+      const i = header.findIndex(h => h.includes(n.toLowerCase()));
+      if (i >= 0) return i;
+    }
+    return -1;
+  };
+  const cPart = idx(['material number','material no','part number','part no','partno','matnr','material','零件号']);
+  const cQty  = idx(['quantity','qty','cantidad','用量','数量']);
+  const cUbi  = idx(['ubication','ubicación','ubicacion','location','warehouse','库位','库房']);
+
+  if (cPart < 0 || cQty < 0) throw new Error('Columns "Material Number" and "Quantity" are required');
+
+  let added = 0;
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || !r.length) continue;
+    const partNo = String(r[cPart] || '').trim();
+    if (!partNo) continue;
+    const qty = Number(String(r[cQty]).replace(/[^0-9.\-]/g,''));
+    if (!qty || qty <= 0) continue;
+    const ubication = cUbi >= 0 ? String(r[cUbi] || '').trim() : '';
+    STATE.scrap.push({
+      id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now()+Math.random()+Math.random()),
+      partNo, qty, ubication, note: 'bulk upload',
+      date: new Date().toISOString()
+    });
+    added++;
+  }
+  return added;
+}
+
+function renderScrapList() {
+  const wrap = $('#scrapList');
+  if (!wrap) return;
+  if (!STATE.scrap.length) {
+    wrap.innerHTML = '<span class="hint" style="margin:0">No scrap recorded yet.</span>';
+    return;
+  }
+  const sorted = [...STATE.scrap].sort((a,b) => (b.date||'').localeCompare(a.date||''));
+  wrap.innerHTML = sorted.map(s => `
+    <div class="scrap-item" data-id="${s.id}">
+      <span class="mono">${escapeHtml(s.partNo)}</span>
+      <span>${escapeHtml(s.ubication || '—')}</span>
+      <span class="num">−${fmt(s.qty)}</span>
+      <span class="ts">${escapeHtml(s.note || '')}</span>
+      <span class="ts">${fmtDateTime(s.date)}</span>
+      <button data-role="del" title="Delete">✕</button>
+    </div>
+  `).join('');
+  wrap.querySelectorAll('button[data-role=del]').forEach(btn => {
+    btn.addEventListener('click', e => {
+      const id = e.target.closest('.scrap-item').dataset.id;
+      STATE.scrap = STATE.scrap.filter(x => x.id !== id);
+      savePersistedScrap();
+      renderScrapList();
+      renderInventoryTable();
+      renderPlanning();
+    });
+  });
+}
+
+function scrapByPartNo() {
+  const out = {};
+  for (const s of STATE.scrap) out[s.partNo] = (out[s.partNo] || 0) + s.qty;
+  return out;
+}
+
+/* =========================================================
+   INVENTORY
+   ========================================================= */
+function computeInventory() {
+  const inv = {};
+  for (const p of Object.keys(STATE.partIndex)) {
+    inv[p] = { inTransit: 0, warehouses: {}, factoryFloor: 0, edgeLine: 0, total: 0 };
+  }
+  for (const b of STATE.batches) {
+    if (!b.qty || b._stage === 'consumed' || b._stage === 'unassigned') continue;
+    const key = resolveBomKeyForBatch(b);
+    if (!key) continue;
+    for (const [partNo, p] of Object.entries(STATE.partIndex)) {
+      const q = p.perBomQty[key];
+      if (!q) continue;
+      const amount = q * b.qty;
+      if (b._stage === 'inTransit')         inv[partNo].inTransit    += amount;
+      else if (b._stage === 'factoryFloor') inv[partNo].factoryFloor += amount;
+      else if (b._stage === 'edgeLine')     inv[partNo].edgeLine     += amount;
+      else if (b._stage === 'warehouse') {
+        const wh = b._warehouse || '__unassigned__';
+        inv[partNo].warehouses[wh] = (inv[partNo].warehouses[wh] || 0) + amount;
+      }
+      inv[partNo].total += amount;
+    }
+  }
+  STATE.inventory = inv;
+}
+
+function renderInventoryTable() {
+  const tbl = $('#invTable');
+  const q = ($('#invSearch').value || '').toLowerCase();
+  const whEnabled = STATE.config.warehouses.filter(w => w.enabled);
+  const scrapMap = scrapByPartNo();
+
+  const rows = Object.values(STATE.partIndex).filter(p => {
+    if (!q) return true;
+    const hay = `${p.partNo} ${p.nameCN} ${p.nameEN}`.toLowerCase();
+    return hay.includes(q);
+  });
+
+  if (!rows.length) {
+    tbl.innerHTML = `<thead><tr><th>Upload BOM &amp; batch files first</th></tr></thead>`;
+    return;
+  }
+
+  const head = `
+    <thead><tr>
+      <th>Part No.</th><th>Name</th><th>UOM</th>
+      <th class="num">In Transit</th>
+      ${whEnabled.map(w => `<th class="num">${escapeHtml(w.name)}</th>`).join('')}
+      <th class="num">Factory Floor</th>
+      <th class="num">Edge Line</th>
+      <th class="num">Total</th>
+      <th class="num">Scrap</th>
+      <th class="num">Available</th>
+    </tr></thead>`;
+
+  const body = rows.map(p => {
+    const inv = STATE.inventory[p.partNo] ||
+      { inTransit:0, warehouses:{}, factoryFloor:0, edgeLine:0, total:0 };
+    const scrap = scrapMap[p.partNo] || 0;
+    const available = inv.total - scrap;
+    return `
+      <tr>
+        <td><b>${escapeHtml(p.partNo)}</b></td>
+        <td>${escapeHtml(p.nameCN || p.nameEN)}</td>
+        <td>${escapeHtml(p.uom)}</td>
+        <td class="num">${fmt(inv.inTransit)}</td>
+        ${whEnabled.map(w => `<td class="num">${fmt(inv.warehouses[w.id] || 0)}</td>`).join('')}
+        <td class="num">${fmt(inv.factoryFloor)}</td>
+        <td class="num">${fmt(inv.edgeLine)}</td>
+        <td class="num"><b>${fmt(inv.total)}</b></td>
+        <td class="num" style="color:${scrap?'var(--danger)':'inherit'}">${scrap? '−'+fmt(scrap) : '—'}</td>
+        <td class="num"><b>${fmt(available)}</b></td>
+      </tr>`;
+  }).join('');
+
+  tbl.innerHTML = head + `<tbody>${body}</tbody>`;
+}
+
+/* =========================================================
+   BUTTONS
+   ========================================================= */
+function bindButtons() {
+  $('#bomFolderPick').addEventListener('click', pickBomFolder);
+  $('#bomFolderProcess').addEventListener('click', processBomFolder);
+  bindFolderFallback();
+  bindBomListSearch();
+  $('#bomProgressToggle').addEventListener('click', () => {
+    const list = $('#bomProgressList');
+    const btn  = $('#bomProgressToggle');
+    const nowHidden = list.classList.toggle('hidden');
+    btn.textContent = nowHidden ? '▸ Display batch list' : '▾ Hide batch list';
+  });
+  $('#batchLineFilter')?.addEventListener('change', renderBatchTable);   
+  $('#bomSearch').addEventListener('input', renderBomTable);
+  $('#bomFilter').addEventListener('change', renderBomTable);
+  $('#invSearch').addEventListener('input', renderInventoryTable);
+  $('#planSearch').addEventListener('input', renderPlanning);
+  $('#planOnlyShort').addEventListener('change', renderPlanning);
+  $('#batchSearch').addEventListener('input', renderBatchTable);
+  ['c_factoryFloor','c_edgeLine','c_inTransit','c_safety'].forEach(id =>
+  $('#'+id).addEventListener('change', renderPlanning));
+  $('#batchClearFilters').addEventListener('click', () => {
+    STATE.batchView = { sorts: {}, filters: {} };
+    $('#batchSearch').value = '';
+    renderBatchTable();
+  });
+  /* NEW — expand / collapse the batch tree */
+  $('#batchExpandAll')?.addEventListener('click', batchExpandAll);
+  $('#batchCollapseAll')?.addEventListener('click', batchCollapseAll);
+   
+  $('#autoClassify').addEventListener('click', () => {
+    classifyBatches(); renderBatchStats(); renderBatchTable();
+    computeInventory(); renderInventoryTable(); renderPlanning();
+  });
+
+  $('#planAdd').addEventListener('click', () => {
+    const bomKey = $('#planModel').value;
+    const qty    = Number($('#planQty').value);
+    if (!bomKey || !qty) return;
+    STATE.plan.push({ bomKey, qty });
+    $('#planQty').value = '';
+    renderPlanList(); renderPlanning();
+  });
+  $('#planClear').addEventListener('click', () => { STATE.plan = []; renderPlanList(); renderPlanning(); });
+
+  $('#exportBom').addEventListener('click', exportBom);
+  $('#exportInv').addEventListener('click', exportInventory);
+  $('#exportPlan').addEventListener('click', exportPlan);
+
+  $('#whAdd').addEventListener('click', () => {
+    STATE.config.warehouses.push({ id: 'WH'+(STATE.config.warehouses.length+1), name:'New warehouse', enabled:true });
+    renderWarehouseEditor(); renderWarehouseChecklist(); renderBatchStats();
+  });
+  $('#whSave').addEventListener('click', saveWarehouses);
+
+  $('#convAdd').addEventListener('click', () => {
+    STATE.config.conversionTable.push({ modelo:'', color:'', vehicleMatNo:'' });
+    renderConversionTable();
+  });
+  $('#convSave').addEventListener('click', saveConversionTable);
+
+  $('#resetAll').addEventListener('click', () => {
+    if (!confirm('Erase all uploaded data and local overrides?')) return;
+    STATE.boms = []; STATE.batches = []; STATE.plan = []; STATE.scrap = [];
+    STATE.inventory = {}; STATE.partIndex = {};
+    STATE.batchView = { sorts: {}, filters: {} };
+    STATE.bomRegistry = new Map();
+    STATE.bomCounter  = new Map();
+    STATE.mrpStock = {
+      items: [], byPartNo: {}, loaded: false, fileName: '',
+      model: '', variantKey: '',
+      demands: []
+    };
+    const sp = $('#stockFilePath'); if (sp) sp.value = '';
+    const si = $('#stockFileInfo'); if (si) si.textContent = 'No stock file loaded.';     
+    WHERE_USED_OPEN.clear();
+    savePersistedScrap();
+    try { localStorage.removeItem(LS_CONFIG); } catch(e){}
+    _bomFolderHandle = null;
+    _bomFolderFiles  = [];
+    $('#bomFolderPath').value = '';
+    $('#bomFolderInfo').textContent = 'No folder selected yet.';
+    $('#bomFolderProcess').disabled = true;
+    $('#bomProgressWrap').classList.add('hidden');
+    $('#bomListSearch').value = '';
+    $('#bomListSearchResult').classList.add('hidden');
+    $('#bomListSearchResult').innerHTML = '';
+    $('#bomProgressToggle').classList.add('hidden');
+    $('#bomProgressToggle').classList.remove('has-errors');
+    $('#bomProgressList').classList.add('hidden');
+    renderBomList(); renderBomTable(); renderBatchTable(); renderBatchStats();
+    renderInventoryTable(); renderPlanList(); renderPlanning();
+    renderScrapList(); renderConversionTable();
+  });
+
+  bindScrapForm();
+}
+
+/* =========================================================
+   PLAN
+   ========================================================= */
+function renderPlanList() {
+  const wrap = $('#planList');
+  if (!STATE.plan.length) { wrap.innerHTML = '<span class="hint" style="margin:0">No plan items yet.</span>'; return; }
+  wrap.innerHTML = STATE.plan.map((p, i) => {
+    const bom = STATE.boms.find(b => bomKeyOf(b) === p.bomKey);
+    const label = bom ? bomDisplayName(bom) : p.bomKey;
+    return `
+      <div class="file-item">
+        <span class="tag" title="${escapeHtml(label)}">${escapeHtml(shorten(label, 40))}</span>
+        <div class="grow">${fmt(p.qty)} vehicles</div>
+        <button class="btn ghost" data-i="${i}">✕</button>
+      </div>`;
+  }).join('');
+  wrap.querySelectorAll('button').forEach(b => b.addEventListener('click', e => {
+    STATE.plan.splice(+e.target.dataset.i, 1);
+    renderPlanList(); renderPlanning();
+  }));
+}
+
+function renderWarehouseChecklist() {
+  const wrap = $('#whChecklist');
+  const active = STATE.config.warehouses.filter(w => w.enabled);
+  wrap.innerHTML = active.map(w => `
+    <label class="toggle">
+      <input type="checkbox" data-wh="${w.id}" checked/>
+      ${escapeHtml(w.name)}
+    </label>
+  `).join('');
+  wrap.querySelectorAll('input[data-wh]').forEach(inp => {
+    inp.addEventListener('change', renderPlanning);
+  });
+}
+
+function renderWarehouseEditor() {
+  const wrap = $('#whEditor');
+  wrap.innerHTML = STATE.config.warehouses.map((w,i) => `
+    <div class="wh-row">
+      <input type="checkbox" data-i="${i}" data-role="enabled" ${w.enabled?'checked':''}/>
+      <input type="text" data-i="${i}" data-role="name" value="${escapeHtml(w.name)}"/>
+      <button data-i="${i}" data-role="del">✕</button>
+    </div>
+  `).join('');
+  wrap.querySelectorAll('input').forEach(inp => inp.addEventListener('change', e => {
+    const i = +e.target.dataset.i;
+    if (e.target.dataset.role === 'name')    STATE.config.warehouses[i].name = e.target.value;
+    if (e.target.dataset.role === 'enabled') STATE.config.warehouses[i].enabled = e.target.checked;
+  }));
+  wrap.querySelectorAll('button[data-role=del]').forEach(b => b.addEventListener('click', e => {
+    STATE.config.warehouses.splice(+e.target.dataset.i, 1);
+    renderWarehouseEditor(); renderWarehouseChecklist();
+  }));
+}
+function saveWarehouses() {
+  savePersistedOverrides();
+  renderWarehouseChecklist();
+  renderBatchStats();
+  renderBatchTable();
+  computeInventory();
+  renderInventoryTable();
+  renderPlanning();
+  alert('Warehouses updated.');
+}
+
+function renderConversionTable() {
+  const wrap = $('#convTable');
+  if (!wrap) return;
+  const rows = STATE.config.conversionTable || [];
+  wrap.innerHTML = `
+    <div class="conv-head">
+      <span>Modelo (batch)</span>
+      <span>Color (batch)</span>
+      <span>Vehicle Material No. (BOM)</span>
+      <span></span>
+    </div>
+    ${rows.map((r,i) => `
+      <div class="conv-row" data-i="${i}">
+        <input type="text" data-role="modelo" value="${escapeHtml(r.modelo||'')}" placeholder="e.g. S400 HEV Excellence" />
+        <input type="text" data-role="color"  value="${escapeHtml(r.color||'')}"  placeholder="blank = any color" />
+        <input type="text" class="mono" data-role="vehno" value="${escapeHtml(r.vehicleMatNo||'')}" placeholder="e.g. LE60U5BWL01" />
+        <button data-role="del" title="Delete">✕</button>
+      </div>
+    `).join('')}
+  `;
+  wrap.querySelectorAll('input').forEach(inp => inp.addEventListener('input', e => {
+    const i = +e.target.closest('.conv-row').dataset.i;
+    const r = STATE.config.conversionTable[i];
+    if (e.target.dataset.role === 'modelo') r.modelo = e.target.value;
+    if (e.target.dataset.role === 'color')  r.color  = e.target.value;
+    if (e.target.dataset.role === 'vehno')  r.vehicleMatNo = e.target.value;
+  }));
+  wrap.querySelectorAll('button[data-role=del]').forEach(b => b.addEventListener('click', e => {
+    const i = +e.target.closest('.conv-row').dataset.i;
+    STATE.config.conversionTable.splice(i, 1);
+    renderConversionTable();
+  }));
+}
+
+function saveConversionTable() {
+  savePersistedOverrides();
+  renderBatchTable(); 
+  renderBatchStats();
+  computeInventory();
+  renderInventoryTable();
+  renderPlanning();
+  alert('Conversion table saved.');
+}
+
+/* =========================================================
+   PLANNING
+   ========================================================= */
+function renderPlanning() {
+  const tbl = $('#planTable');
+  if (!STATE.plan.length) {
+    tbl.innerHTML = `<thead><tr><th>Add plan items above</th></tr></thead>`;
+    $('#planStats').innerHTML = '';
+    return;
+  }
+  if (!Object.keys(STATE.partIndex).length) {
+    tbl.innerHTML = `<thead><tr><th>Upload BOM files first</th></tr></thead>`;
+    return;
+  }
+
+  const useFF  = $('#c_factoryFloor').checked;
+  const useEL  = $('#c_edgeLine').checked;
+  const useIT  = $('#c_inTransit').checked;
+  const safety = parseFloat($('#c_safety').value) || 1.0;
+  const whOn = {};
+  $$('#whChecklist input[data-wh]').forEach(i => whOn[i.dataset.wh] = i.checked);
+  const scrapMap = scrapByPartNo();
+
+  const required = {};
+  for (const p of STATE.plan) {
+    for (const [partNo, info] of Object.entries(STATE.partIndex)) {
+      const q = info.perBomQty[p.bomKey];
+      if (!q) continue;
+      required[partNo] = (required[partNo] || 0) + q * p.qty * safety;
+    }
+  }
+
+  const q = ($('#planSearch').value || '').toLowerCase();
+  const onlyShort = $('#planOnlyShort').checked;
+  const rows = [];
+
+  for (const [partNo, req] of Object.entries(required)) {
+    const info = STATE.partIndex[partNo];
+    const inv  = STATE.inventory[partNo] ||
+      {inTransit:0, warehouses:{}, factoryFloor:0, edgeLine:0, total:0};
+    let avail = 0;
+    if (useFF) avail += inv.factoryFloor;
+    if (useEL) avail += inv.edgeLine;
+    if (useIT) avail += inv.inTransit;
+    for (const [whId, on] of Object.entries(whOn)) {
+      if (on) avail += inv.warehouses[whId] || 0;
+    }
+    avail -= (scrapMap[partNo] || 0);
+    const short = Math.max(0, req - avail);
+    if (onlyShort && short <= 0) continue;
+    if (q) {
+      const hay = `${partNo} ${info.nameCN} ${info.nameEN}`.toLowerCase();
+      if (!hay.includes(q)) continue;
+    }
+    rows.push({ partNo, info, req, avail, short });
+  }
+
+  rows.sort((a,b) => (b.short - a.short) || a.partNo.localeCompare(b.partNo));
+  const shortCount = rows.filter(r => r.short > 0).length;
+
+  $('#planStats').innerHTML = `
+    <div class="stat"><div class="label">Parts required</div><div class="value">${rows.length}</div></div>
+    <div class="stat"><div class="label">Parts short</div><div class="value" style="color:${shortCount?'var(--danger)':'var(--ok)'}">${shortCount}</div></div>
+    <div class="stat"><div class="label">Total vehicles</div><div class="value">${fmt(STATE.plan.reduce((a,p)=>a+p.qty,0))}</div></div>
+  `;
+
+  tbl.innerHTML = `
+    <thead><tr>
+      <th>Part No.</th><th>Name</th><th>UOM</th>
+      <th class="num">Required</th>
+      <th class="num">Available</th>
+      <th class="num">Shortage</th>
+      <th>Status</th>
+    </tr></thead>
+    <tbody>
+      ${rows.map(r => `
+        <tr>
+          <td><b>${escapeHtml(r.partNo)}</b></td>
+          <td>${escapeHtml(r.info.nameCN || r.info.nameEN)}</td>
+          <td>${escapeHtml(r.info.uom)}</td>
+          <td class="num">${fmt(r.req)}</td>
+          <td class="num">${fmt(r.avail)}</td>
+          <td class="num" style="color:${r.short>0?'var(--danger)':'inherit'};font-weight:${r.short>0?'600':'400'}">${fmt(r.short)}</td>
+          <td>${r.short > 0 ? '<span class="pill short">SHORT</span>' : '<span class="pill ok">OK</span>'}</td>
+        </tr>`).join('')}
+    </tbody>`;
+}
+
+/* =========================================================
+   EXPORTS
+   ========================================================= */
+function downloadWorkbook(wb, filename) { XLSX.writeFile(wb, filename); }
+function aoaToSheet(aoa) { return XLSX.utils.aoa_to_sheet(aoa); }
+
+function exportBom() {
+  const boms = STATE.boms;
+  const aoa = [['Part No.','Name','UOM','Type','BOMs Used', ...boms.map(b => bomDisplayName(b))]];
+  for (const p of Object.values(STATE.partIndex)) {
+    aoa.push([
+      p.partNo, p.nameEN || p.nameCN, p.uom,
+      p.isCommon ? 'COMMON' : 'SPECIFIC',
+      [...p.bomKeys].join(' | '),
+      ...boms.map(b => p.perBomQty[bomKeyOf(b)] || '')
+    ]);
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Material List');
+  downloadWorkbook(wb, `Material_List_${dateStamp()}.xlsx`);
+}
+
+function exportInventory() {
+  const whEnabled = STATE.config.warehouses.filter(w => w.enabled);
+  const scrapMap = scrapByPartNo();
+  const aoa = [['Part No.','Name','UOM','In Transit', ...whEnabled.map(w=>w.name),
+                'Factory Floor','Edge Line','Total','Scrap','Available']];
+  for (const p of Object.values(STATE.partIndex)) {
+    const inv = STATE.inventory[p.partNo] ||
+      {inTransit:0, warehouses:{}, factoryFloor:0, edgeLine:0, total:0};
+    const scrap = scrapMap[p.partNo] || 0;
+    aoa.push([
+      p.partNo, p.nameCN || p.nameEN, p.uom,
+      inv.inTransit,
+      ...whEnabled.map(w => inv.warehouses[w.id] || 0),
+      inv.factoryFloor, inv.edgeLine, inv.total,
+      scrap, inv.total - scrap
+    ]);
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Inventory');
+  downloadWorkbook(wb, `Material_Inventory_${dateStamp()}.xlsx`);
+}
+
+function exportPlan() {
+  const useFF  = $('#c_factoryFloor').checked;
+  const useEL  = $('#c_edgeLine').checked;
+  const useIT  = $('#c_inTransit').checked;
+  const safety = parseFloat($('#c_safety').value) || 1.0;
+  const whOn = {};
+  $$('#whChecklist input[data-wh]').forEach(i => whOn[i.dataset.wh] = i.checked);
+  const scrapMap = scrapByPartNo();
+
+  const required = {};
+  for (const p of STATE.plan) {
+    for (const [partNo, info] of Object.entries(STATE.partIndex)) {
+      const q = info.perBomQty[p.bomKey];
+      if (!q) continue;
+      required[partNo] = (required[partNo] || 0) + q * p.qty * safety;
+    }
+  }
+
+  const aoa = [
+    ['Plan:', ...STATE.plan.map(p => {
+      const bom = STATE.boms.find(b => bomKeyOf(b) === p.bomKey);
+      return `${bom ? bomDisplayName(bom) : p.bomKey} × ${p.qty}`;
+    })],
+    ['Safety factor:', safety],
+    [],
+    ['Part No.','Name','UOM','Required','Available','Shortage','Status']
+  ];
+  for (const [partNo, req] of Object.entries(required)) {
+    const info = STATE.partIndex[partNo];
+    const inv  = STATE.inventory[partNo] ||
+      {inTransit:0, warehouses:{}, factoryFloor:0, edgeLine:0, total:0};
+    let avail = 0;
+    if (useFF) avail += inv.factoryFloor;
+    if (useEL) avail += inv.edgeLine;
+    if (useIT) avail += inv.inTransit;
+    for (const [whId,on] of Object.entries(whOn)) if (on) avail += inv.warehouses[whId] || 0;
+    avail -= (scrapMap[partNo] || 0);
+    const short = Math.max(0, req - avail);
+    aoa.push([
+      partNo, info.nameCN || info.nameEN, info.uom,
+      round3(req), round3(avail), round3(short), short > 0 ? 'SHORT' : 'OK'
+    ]);
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Plan');
+  downloadWorkbook(wb, `Production_Plan_${dateStamp()}.xlsx`);
+}
+
+/* =========================================================
+   DISPLAY BOM MODAL
+   ========================================================= */
+function openBomDisplay(bomId, specKey, preferredColorCode) {
+  /* Scope strictly to the provided specKey */
+  const matchingBoms = STATE.boms.filter(b => 
+    b.bomId === bomId && specKeyOf(b.vehicleMatNo) === specKey
+  );
+  
+  if (!matchingBoms.length) { 
+    alert(`BOM "${bomId}" not found in this spec.`); 
+    return; 
+  }
+
+  const modal = $('#bomDisplayModal');
+  modal.dataset.bomid = bomId;
+
+  /* Group by exterior colour */
+  const colorMap = new Map();
+  for (const b of matchingBoms) {
+    const cc = colorCodeOf(b.vehicleMatNo) || '';
+    if (!colorMap.has(cc)) colorMap.set(cc, []);
+    colorMap.get(cc).push(b);
+  }
+  const sortedColors = Array.from(colorMap.keys()).sort();
+
+  /* Subtitle */
+  const linkedBatchIds = new Set(matchingBoms.map(b => b.batchId).filter(Boolean));
+  const batchMwoSet = new Set();
+  for (const batch of STATE.batches) {
+    if (linkedBatchIds.has(batch.batch) && batch.mwo) batchMwoSet.add(batch.mwo);
+  }
+  const batchMwos = Array.from(batchMwoSet).sort();
+
+  modal.querySelector('.bdm-title').textContent = `BOM Contents — ${bomId}`;
+  modal.querySelector('.bdm-subtitle').innerHTML =
+    `<span class="bdm-meta">${matchingBoms.length} sales batch${matchingBoms.length === 1 ? '' : 'es'} · ${sortedColors.length} colour${sortedColors.length === 1 ? '' : 's'}</span>` +
+    (batchMwos.length ? ` <span class="bdm-mwo">MWO: ${batchMwos.map(escapeHtml).join(', ')}</span>` : '');
+
+  /* Colour selector */
+  const actions = modal.querySelector('.modal-actions');
+  if (actions) {
+    const prev = actions.querySelector('#bdmColorSelect');
+    if (prev) prev.parentElement.remove();
+  }
+
+  if (sortedColors.length > 1 && actions) {
+    const wrap = document.createElement('label');
+    wrap.className = 'bdm-color-select-wrap';
+    const label = document.createElement('span');
+    label.textContent = 'Colour:';
+    const sel = document.createElement('select');
+    sel.id = 'bdmColorSelect';
+    sel.innerHTML = sortedColors.map(cc =>
+      `<option value="${escapeHtml(cc)}">${escapeHtml(cc || '(no colour)')}</option>`
+    ).join('');
+    wrap.appendChild(label);
+    wrap.appendChild(sel);
+    actions.insertBefore(wrap, actions.firstChild);
+    sel.onchange = () => renderBomDisplayBody(modal, sel.value);
+  }
+
+  modal._bdmContext = { colorMap };
+
+  let initialColor = sortedColors[0] || '';
+  if (preferredColorCode && sortedColors.includes(preferredColorCode)) initialColor = preferredColorCode;
+
+  const sel = modal.querySelector('#bdmColorSelect');
+  if (sel) sel.value = initialColor;
+  renderBomDisplayBody(modal, initialColor);
+
+  modal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+
+function renderBomDisplayBody(modal, colorCode) {
+  const ctx = modal._bdmContext;
+  if (!ctx) return;
+  const bomsOfColor = ctx.colorMap.get(colorCode) || [];
+  if (!bomsOfColor.length) return;
+
+  const rep    = bomsOfColor[0];
+  const hasMwo = rep.parts.some(p => p.mwo);
+
+  const partsRows = rep.parts
+    .slice()
+    .sort((a, b) => String(a.partNo).localeCompare(String(b.partNo), undefined, { numeric: true }))
+    .map(p => `
+      <tr>
+        <td class="mono">${escapeHtml(p.partNo)}</td>
+        <td>${escapeHtml(p.nameEN || p.nameCN || '')}</td>
+        <td class="num">${fmt(p.qty)}</td>
+        <td>${escapeHtml(p.uom || '')}</td>
+        ${hasMwo ? `<td class="mono">${escapeHtml(p.mwo || '')}</td>` : ''}
+      </tr>`)
+    .join('');
+
+  modal.querySelector('.bdm-body').innerHTML = `
+    <table class="bdm-table">
+      <thead>
+        <tr>
+          <th>Material Number</th>
+          <th>Material Description</th>
+          <th class="num">Qty per car</th>
+          <th>UoM</th>
+          ${hasMwo ? '<th>MWO</th>' : ''}
+        </tr>
+      </thead>
+      <tbody>${partsRows}</tbody>
+    </table>`;
+}
+function closeBomDisplay() {
+  const modal = $('#bomDisplayModal');
+  modal.classList.add('hidden');
+  document.body.style.overflow = '';
+}
+
+function exportBomDisplay() {
+  const modal = $('#bomDisplayModal');
+  const bomId = modal.dataset.bomid;
+  const ctx   = modal._bdmContext;
+  if (!ctx) return;
+
+  const sel = modal.querySelector('#bdmColorSelect');
+  const colorCode = sel ? sel.value : (Array.from(ctx.colorMap.keys())[0] || '');
+  const bomsOfColor = ctx.colorMap.get(colorCode) || [];
+  if (!bomsOfColor.length) return;
+
+  const rep    = bomsOfColor[0];
+  const hasMwo = rep.parts.some(p => p.mwo);
+
+  const header = ['Material Number', 'Material Description', 'Qty per car', 'UoM'];
+  if (hasMwo) header.push('MWO');
+
+  const aoa = [header];
+  rep.parts
+    .slice()
+    .sort((a, b) => String(a.partNo).localeCompare(String(b.partNo), undefined, { numeric: true }))
+    .forEach(p => {
+      const row = [p.partNo, p.nameEN || p.nameCN || '', p.qty, p.uom || ''];
+      if (hasMwo) row.push(p.mwo || '');
+      aoa.push(row);
+    });
+
+  const wb = XLSX.utils.book_new();
+  const sheetName = ((bomId || 'BOM') + (colorCode ? ' ' + colorCode : '')).substring(0, 28);
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), sheetName);
+  const fileBase = `${(bomId || 'BOM').replace(/\s+/g, '_')}${colorCode ? '_' + colorCode : ''}`;
+  downloadWorkbook(wb, `${fileBase}_${dateStamp()}.xlsx`);
+}
+function bindBomDisplayModal() {
+  $('#bdmClose')?.addEventListener('click', closeBomDisplay);
+  $('#bdmExport')?.addEventListener('click', exportBomDisplay);
+  $('#bomDisplayModal')?.addEventListener('click', e => {
+    if (e.target.id === 'bomDisplayModal') closeBomDisplay();
+  });
+  document.addEventListener('keydown', e => {
+    const m = $('#bomDisplayModal');
+    if (e.key === 'Escape' && m && !m.classList.contains('hidden')) closeBomDisplay();
+  });
+}
+
+/* =========================================================
+   UTILITIES
+   ========================================================= */
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  })[c]);
+}
+function shorten(s, n) { s = String(s||''); return s.length > n ? s.slice(0, n-1) + '…' : s; }
+/* Locale-independent date formatters — DD/MM/YYYY. */
+function fmtDate(d) {
+  if (!d) return '';
+  const dt = (d instanceof Date) ? d : new Date(d);
+  if (isNaN(dt)) return '';
+  const dd   = String(dt.getDate()).padStart(2, '0');
+  const mm   = String(dt.getMonth() + 1).padStart(2, '0');
+  const yyyy = dt.getFullYear();
+  return `${dd}/${mm}/${yyyy}`;
+}
+function fmtDateTime(d) {
+  if (!d) return '';
+  const dt = (d instanceof Date) ? d : new Date(d);
+  if (isNaN(dt)) return '';
+  const dd   = String(dt.getDate()).padStart(2, '0');
+  const mm   = String(dt.getMonth() + 1).padStart(2, '0');
+  const yyyy = dt.getFullYear();
+  const hh   = String(dt.getHours()).padStart(2, '0');
+  const mi   = String(dt.getMinutes()).padStart(2, '0');
+  return `${dd}/${mm}/${yyyy} ${hh}:${mi}`;
+}
+function dateStamp() {
+  const d = new Date();
+  return `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+}
+function round3(n) { return Math.round(n * 1000) / 1000; }
+/* =========================================================
+   PRODUCTION MONITORING
+   ========================================================= */
+const PROD_STAGES = [
+  { key: 'devanning',   label: '005 De-vanning',       short: 'DEV', color: '#94a3b8' },
+  { key: 'trimIn',      label: '020 Trim-in',          short: 'TRM', color: '#3b82f6' },
+  { key: 'offLine',     label: '030 Off-line OK',      short: 'OFF', color: '#8b5cf6' },
+  { key: 'buyOff',      label: 'Buy-off OK',           short: 'BUY', color: '#f59e0b' },
+  { key: 'compoundIn',  label: 'Compound Gate-in',     short: 'CIN', color: '#10b981' },
+  { key: 'compoundOut', label: 'Compound Gate-out OK', short: 'COT', color: '#059669' }
+];
+
+/* Sequence first letter → production line */
+const PROD_LINE_MAP = { A: 'A0', B: 'M1', D: 'M0' };
+
+/* CSV column auto-detection hints (exact → fallback contains) */
+const PROD_COL_HINTS = {
+  code:         ['code'],
+  sequence:     ['sequence'],
+  batch:        ['batch'],
+  description:  ['description'],
+  color:        ['color'],
+  colorCode:    ['colorcode', 'color code'],
+  materialCode: ['materialcode', 'material code'],
+  devanning:    ['005 devanning'],
+  trimIn:       ['020 trim in'],
+  offLine:      ['030 off line ok'],
+  diverted:     ['025 diverted'],                          // ← NEW
+  buyOff:       ['buy off ok'],
+  compoundIn:   ['compound gate in in', 'compound gate in'],
+  compoundOut:  ['compound gate out ok']
+};
+/* VIN normalisation: strip every non-alphanumeric separator */
+function cleanVin(s) {
+  if (!s) return '';
+  return String(s).replace(/[^A-Za-z0-9]/g, '');
+}
+
+/* Displayed VIN — prefers the human-readable 'code' column,
+   falls back to the raw vinId (dashes stripped). */
+function displayVin(rec) {
+  if (!rec || !rec.code) return '';
+  return cleanVin(rec.code);
+}
+/* Most-frequent non-empty value of a field across a set of VIN records.
+   Empty / whitespace-only values are skipped, so a batch inherits a colour
+   (or model, or colour code) as soon as any VIN carries one. */
+function dominantField(vins, field) {
+  if (!vins || !vins.length) return '';
+  const counts = {};
+  for (const v of vins) {
+    const val = String(v[field] || '').trim();
+    if (!val) continue;                                  // ← skip empties
+    counts[val] = (counts[val] || 0) + 1;
+  }
+  let best = '', bestN = 0;
+  for (const [k, n] of Object.entries(counts)) {
+    if (n > bestN) { best = k; bestN = n; }
+  }
+  return best;
+}
+/* True when the batch's VINs disagree on a field:
+   two or more distinct non-empty values exist. */
+function hasFieldConflict(vins, field) {
+  if (!vins || !vins.length) return false;
+  const seen = new Set();
+  for (const v of vins) {
+    const val = String(v[field] || '').trim();
+    if (!val) continue;
+    seen.add(val);
+    if (seen.size > 1) return true;
+  }
+  return false;
+}
+
+/* True when the batch's VINs disagree on their production line.
+   '—' is ignored (VINs without a sequence don't vote). */
+function hasLineConflict(batch) {
+  if (!batch || !batch.vins || !batch.vins.length) return false;
+  const seen = new Set();
+  for (const r of batch.vins) {
+    const l = lineOfSequence(r.sequence);
+    if (l === '—') continue;
+    seen.add(l);
+    if (seen.size > 1) return true;
+  }
+  return false;
+}
+/* Most-frequent production line across a batch's VINs.
+   Ignores the '—' placeholder (VINs with no sequence yet) so a batch is
+   always tagged with the line its known VINs actually rolled out from.
+   Falls back to '—' only when no VIN in the batch has a resolvable line. */
+function dominantLine(batch) {
+  if (!batch || !batch.vins || !batch.vins.length) return '—';
+  const counts = {};
+  for (const r of batch.vins) {
+    const l = lineOfSequence(r.sequence);
+    if (l === '—') continue;                          // skip unknown lines
+    counts[l] = (counts[l] || 0) + 1;
+  }
+  let best = '—', bestN = 0;
+  for (const [k, n] of Object.entries(counts)) {
+    if (n > bestN) { best = k; bestN = n; }
+  }
+  return best;
+}
+/* Distinct production lines present in the loaded file. */
+function getAvailableLines() {
+  const s = new Set();
+  for (const r of STATE.production.records) s.add(lineOfSequence(r.sequence));
+  return Array.from(s).sort();
+}
+
+/* Distinct model descriptions present in the loaded file. */
+function getAvailableModels() {
+  const s = new Set();
+  for (const r of STATE.production.records) {
+    if (r.description) s.add(r.description);
+  }
+  return Array.from(s).sort();
+}
+
+/* True if the record matches the currently applied line / model filters. */
+function recordMatchesLineModel(rec) {
+  const line = lineOfSequence(rec.sequence);
+  if (STATE.production.lines  && !STATE.production.lines.has(line))            return false;
+  const model = rec.description || '';
+  if (STATE.production.models && !STATE.production.models.has(model))          return false;
+  return true;
+}
+
+/* Combined: period + line + model. */
+function recordMatchesFilters(rec) {
+  return recordInPeriod(rec) && recordMatchesLineModel(rec);
+}
+
+/* Set equality that treats null/undefined as "all". */
+function setsEqual(a, b) {
+  if (!a && !b) return true;
+  if (!a || !b) return false;
+  if (a.size !== b.size) return false;
+  for (const v of a) if (!b.has(v)) return false;
+  return true;
+}
+/* Track which spec / colour groups the user has collapsed.
+   (Batch expansion already uses PROD_BATCH_EXPANDED.) */
+const PROD_SPEC_COLLAPSED  = new Set();
+const PROD_COLOR_COLLAPSED = new Set();
+const PROD_LINE_COLLAPSED = new Set();
+/* Inventory batch tree — collapse state (persists across re-renders) */
+const BATCH_MODEL_COLLAPSED = new Set();
+const BATCH_COLOR_COLLAPSED = new Set();
+const BATCH_LINE_COLLAPSED = new Set();
+/* Plan vs Execution tree — collapse state */
+const COMP_LINE_COLLAPSED  = new Set();
+const COMP_MODEL_COLLAPSED = new Set();
+const COMP_COLOR_COLLAPSED = new Set();
+
+function lineOfSequence(seq) {
+  if (!seq) return '—';
+  return PROD_LINE_MAP[seq.charAt(0).toUpperCase()] || '—';
+}
+
+function formatProdTime(s) {
+  if (!s) return '<span class="prod-empty">—</span>';
+  const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/);
+  if (!m) return escapeHtml(s);
+  const [, y, mo, d, h, mi] = m;
+  return `<span title="${escapeHtml(s)}">${d}/${mo}/${y} ${h}:${mi}</span>`;
+}
+/* Merge "030 OFF LINE OK" and "025 DIVERTED".
+   Reads the first 10 characters of each value as YYYY-MM-DD and returns
+   the full original string of whichever date is earlier. If neither cell
+   contains a usable date, returns ''. */
+function mergeOffLineDates(offLineVal, divertedVal) {
+  const a = String(offLineVal || '').trim();
+  const b = String(divertedVal || '').trim();
+  const da = a.slice(0, 10);
+  const db = b.slice(0, 10);
+  const hasA = /^\d{4}-\d{2}-\d{2}$/.test(da);
+  const hasB = /^\d{4}-\d{2}-\d{2}$/.test(db);
+  if (!hasA && !hasB) return '';
+  if (!hasA) return b;
+  if (!hasB) return a;
+  /* YYYY-MM-DD sorts lexically, so a simple string compare works */
+  return da <= db ? a : b;
+}
+/* ---- Streaming CSV parser (chunked, yields to UI) ---- */
+async function parseProductionCSV(text, onProgress) {
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const len = text.length;
+  let i = 0, field = '', row = [], inQ = false;
+  let lastYield = performance.now();
+
+  /* -- 1. Parse header row -- */
+  const header = [];
+  let headerDone = false;
+  while (i < len && !headerDone) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+        inQ = false;
+      } else field += c;
+    } else {
+      if (c === '"') inQ = true;
+      else if (c === ',') { header.push(field); field = ''; }
+      else if (c === '\n') { header.push(field); field = ''; headerDone = true; }
+      else if (c !== '\r') field += c;
+    }
+    i++;
+  }
+
+  /* -- 2. Map header names → column indices -- */
+  const headerLower = header.map(h => String(h).trim().toLowerCase());
+  const idx = {};
+  for (const [key, hints] of Object.entries(PROD_COL_HINTS)) {
+    let found = -1;
+    for (const h of hints) {
+      const p = headerLower.indexOf(h);
+      if (p >= 0) { found = p; break; }
+    }
+    if (found < 0) {
+      for (const h of hints) {
+        if (h.length < 5) continue;              // ← skip short hints on fallback
+        const p = headerLower.findIndex(x => x.includes(h));
+        if (p >= 0) { found = p; break; }
+      }
+    }
+    idx[key] = found;
+  }
+  if (idx.code < 0) throw new Error('Required column "code" not found in CSV header');
+
+  const maxIdx = Math.max(...Object.values(idx).filter(x => x >= 0));
+  const records = [];
+
+  /* -- 3. Parse data rows directly into lean objects -- */
+  field = ''; row = []; inQ = false;
+
+  const finalizeRow = () => {
+    row.push(field); field = '';
+    if (row.length > maxIdx) {
+      const code = String(row[idx.code] ?? '').trim();
+      if (code) {
+        const rec = { code };
+        for (const [key, ci] of Object.entries(idx)) {
+          if (key === 'code' || ci < 0) continue;
+          rec[key] = String(row[ci] ?? '').trim();
+        }
+
+        /* Off-line OK = earlier of 030 OFF LINE OK and 025 DIVERTED */
+        rec.offLine = mergeOffLineDates(rec.offLine, rec.diverted);
+        delete rec.diverted;
+
+        records.push(rec);
+      }
+    }
+    row = [];
+  };
+
+  while (i < len) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+        inQ = false; i++; continue;
+      }
+      field += c; i++; continue;
+    }
+    if (c === '"') { inQ = true; i++; continue; }
+    if (c === ',') { row.push(field); field = ''; i++; continue; }
+    if (c === '\n') { finalizeRow(); i++; continue; }
+    if (c === '\r') { i++; continue; }
+    field += c; i++;
+
+    if (performance.now() - lastYield > 50) {
+      lastYield = performance.now();
+      onProgress && onProgress(i / len, records.length);
+      await yieldToUI();
+    }
+  }
+  if (field.length || row.length) finalizeRow();
+
+  return { records, header };
+}
+
+function computeProductionBatches(records) {
+  const map = new Map();
+  for (const r of records) {
+
+    /* Orphan VINs (no sales batch) are grouped by their own line + model +
+       colour so they can't be pooled with unrelated VINs from other lines,
+       models or colours into one synthetic "(no batch)" pile. */
+    const id = r.batch
+      ? r.batch
+      : `(no batch) · ${lineOfSequence(r.sequence)}`
+      + ` · ${r.description || '(no model)'}`
+      + ` · ${r.color       || '(no colour)'}`;
+
+    let b = map.get(id);
+    if (!b) { b = { id, vins: [], counts: {} }; map.set(id, b); }
+    b.vins.push(r);
+    for (const s of PROD_STAGES) {
+      if (r[s.key]) b.counts[s.key] = (b.counts[s.key] || 0) + 1;
+    }
+  }
+  return map;
+}
+/* ---- File ingestion ---- */
+async function handleProductionFiles(files) {
+  const f = files[0];
+  if (!f) return;
+
+  const wrap  = $('#prodProgressWrap');
+  const fill  = $('#prodProgressFill');
+  const label = $('#prodProgressLabel');
+  wrap.classList.remove('hidden');
+  fill.style.width = '0%';
+  label.textContent = `Reading ${f.name} (${fmt(f.size / 1048576)} MB)…`;
+  await yieldToUI();
+
+  try {
+    const text = await readFileAsText(f);
+    label.textContent = `Parsing ${fmt(text.length)} characters…`;
+    await yieldToUI();
+
+    const { records, header } = await parseProductionCSV(text, (p, n) => {
+      fill.style.width = (p * 100).toFixed(1) + '%';
+      label.textContent = `Parsing… ${(p * 100).toFixed(0)}% · ${fmt(n)} VINs extracted`;
+    });
+
+    if (!records.length) throw new Error('No valid VIN rows found');
+
+    /* --- Reset state --- */
+    STATE.production.records = records;
+    STATE.production.batches = computeProductionBatches(records);
+    STATE.production.header  = header;
+    STATE.production.loaded  = true;
+    STATE.production.vinView.page = 1;
+    STATE.production.batchView.search = '';
+    STATE.production.vinView.search = '';
+    STATE.production.vinView.stage = 'all';
+    STATE.production.periodStage        = '';   // ← ADD
+    STATE.production.pendingPeriodStage = '';   // ← ADD
+    $('#prodPeriodStage').value = '';           // ← ADD     
+    $('#prodBatchSearch').value = '';
+    $('#prodVinSearch').value = '';
+    $('#prodVinStage').value = 'all';
+
+     PROD_BATCH_EXPANDED.clear();
+     PROD_LINE_COLLAPSED.clear();     // ← add
+     PROD_SPEC_COLLAPSED.clear();
+     PROD_COLOR_COLLAPSED.clear();
+     COMP_LINE_COLLAPSED.clear();
+     COMP_MODEL_COLLAPSED.clear();
+     COMP_COLOR_COLLAPSED.clear();
+
+    /* --- Default monitoring period = entire file --- */
+    const { min, max } = getFileDateBounds();
+    STATE.production.period        = { from: min || '', to: max || '' };
+    STATE.production.pendingPeriod = { from: min || '', to: max || '' };
+    STATE.production.lines         = null;
+    STATE.production.pendingLines  = null;
+    STATE.production.models        = null;
+    STATE.production.pendingModels = null;
+    
+     $('#prodPeriodFrom').value = min || '';
+    $('#prodPeriodTo').value   = max || '';
+
+    /* Highlight the "Full Range" button */
+    $$('.prod-period-btn').forEach(b =>
+      b.classList.toggle('primary', b.dataset.range === 'all'));
+
+    /* --- Render --- */
+    renderLineModelOptions();
+    fill.style.width = '100%';
+    label.textContent = `Done — ${fmt(records.length)} VINs · ${fmt(STATE.production.batches.size)} batches`;
+
+    renderAllProductionViews();
+    updateProductionPeriodHint();
+    updateApplyButtonState();
+
+    setTimeout(() => wrap.classList.add('hidden'), 3000);
+  } catch (e) {
+    console.error(e);
+    label.textContent = `Failed: ${e.message}`;
+    alert(`Failed to parse production file: ${e.message}`);
+  }
+}
+
+function clearProduction() {
+  if (!STATE.production.loaded) return;
+  if (!confirm('Clear all loaded production tracking data?')) return;
+
+  STATE.production = {
+    records: [], batches: new Map(), header: null, loaded: false,
+    period:        { from: '', to: '' },
+    pendingPeriod: { from: '', to: '' },
+    periodStage:        '',
+    pendingPeriodStage: '',     
+    lines:         null, pendingLines:  null,
+    models:        null, pendingModels: null,
+    batchView: { search: '', filter: 'all' },
+    vinView:   { page: 1, pageSize: 100, search: '', stage: 'all' }
+  };
+  PROD_BATCH_EXPANDED.clear();
+  PROD_LINE_COLLAPSED.clear();
+  PROD_SPEC_COLLAPSED.clear();
+  PROD_COLOR_COLLAPSED.clear();
+
+  const fromEl = $('#prodPeriodFrom'); if (fromEl) fromEl.value = '';
+  const toEl   = $('#prodPeriodTo');   if (toEl)   toEl.value   = '';
+  $$('.prod-period-btn').forEach(b => b.classList.remove('primary'));
+  
+   const stageSel = $('#prodPeriodStage');
+  if (stageSel) stageSel.value = '';
+   
+  const applyBtn = $('#prodPeriodApply');
+  if (applyBtn) { applyBtn.disabled = true; applyBtn.classList.remove('pending'); }
+
+  const lineValues  = $('#prodLineValues');  if (lineValues)  lineValues.innerHTML = '';
+  const modelValues = $('#prodModelValues'); if (modelValues) modelValues.innerHTML = '';
+  syncMultiselectUI();
+
+  $('#prodProgressWrap').classList.add('hidden');
+  renderAllProductionViews();
+  updateProductionPeriodHint();
+  updateApplyButtonState();
+}
+/* =========================================================
+   MONITORING PERIOD
+   ========================================================= */
+function ymdLocal(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const dd = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${dd}`;
+}
+
+/* Min/max date present in the loaded file across ALL stages. */
+function getFileDateBounds() {
+  let min = null, max = null;
+  for (const r of STATE.production.records) {
+    for (const s of PROD_STAGES) {
+      const t = r[s.key];
+      if (!t) continue;
+      const m = String(t).match(/^(\d{4}-\d{2}-\d{2})/);
+      if (!m) continue;
+      const d = m[1];
+      if (min === null || d < min) min = d;
+      if (max === null || d > max) max = d;
+    }
+  }
+  return { min, max };
+}
+
+/* Compute { from, to } for a named quick-range, using the system clock. */
+function getPeriodRange(kind) {
+  const t = new Date(); t.setHours(0,0,0,0);
+  switch (kind) {
+    case 'all': {
+      const { min, max } = getFileDateBounds();
+      return { from: min || '', to: max || '' };
+    }
+        case 'thisWeek': {
+      // Monday → Sunday of the current week
+      const day = t.getDay() || 7;                       // Sunday=7
+      const mon = new Date(t); mon.setDate(t.getDate() - (day - 1));
+      const sun = new Date(mon); sun.setDate(mon.getDate() + 6);
+      return { from: ymdLocal(mon), to: ymdLocal(sun) };
+    }
+    case 'thisMonth': {
+      const y = t.getFullYear(), m = t.getMonth();
+      const first = new Date(y, m, 1);
+      const last  = new Date(y, m + 1, 0);
+      return { from: ymdLocal(first), to: ymdLocal(last) };
+    }
+    case 'thisYear': {
+      const y = t.getFullYear();
+      return { from: `${y}-01-01`, to: `${y}-12-31` };
+    }    
+    case 'today': {
+      const s = ymdLocal(t);
+      return { from: s, to: s };
+    }
+    case 'yesterday': {
+      const y = new Date(t); y.setDate(y.getDate()-1);
+      const s = ymdLocal(y);
+      return { from: s, to: s };
+    }
+    case 'lastWeek': {
+      // Previous Monday → Sunday
+      const day = t.getDay() || 7;
+      const thisMon = new Date(t); thisMon.setDate(t.getDate() - (day - 1));
+      const lastMon = new Date(thisMon); lastMon.setDate(thisMon.getDate() - 7);
+      const lastSun = new Date(lastMon); lastSun.setDate(lastMon.getDate() + 6);
+      return { from: ymdLocal(lastMon), to: ymdLocal(lastSun) };
+    }
+    case 'lastMonth': {
+      const y  = t.getFullYear();
+      const m  = t.getMonth();
+      const pm = m === 0 ? 11 : m - 1;
+      const py = m === 0 ? y - 1 : y;
+      const first = new Date(py, pm, 1);
+      const last  = new Date(py, pm + 1, 0);
+      return { from: ymdLocal(first), to: ymdLocal(last) };
+    }
+    case 'lastYear': {
+      const y = t.getFullYear() - 1;
+      return { from: `${y}-01-01`, to: `${y}-12-31` };
+    }
+    default:
+      return { from: '', to: '' };
+  }
+}
+
+/* True if the given timestamp falls inside the current monitoring period. */
+function stageInPeriod(ts) {
+  const p = STATE.production.period || {};
+  const from = p.from || '', to = p.to || '';
+  if (!from && !to) return true;
+  if (!ts) return false;
+  const d = String(ts).slice(0, 10);
+  if (from && d < from) return false;
+  if (to   && d > to)   return false;
+  return true;
+}
+/* As-of semantics: does this timestamp fall on or before period.to?
+   Used for STAGE COUNTING (KPIs + batch columns).
+   VIN SELECTION still uses the range-based stageInPeriod().
+   - period.to set         → ts ≤ period.to
+   - period.to empty, from → fall back to range (ts ≥ from)
+   - both empty            → true */
+function stageReachedByPeriod(ts) {
+  if (!ts) return false;
+  const d = String(ts).slice(0, 10);
+  const p = STATE.production.period || {};
+  if (!p.to) {
+    if (!p.from) return true;
+    return d >= p.from;
+  }
+  return d <= p.to;
+}
+/* True if the record is inside the current monitoring period,
+   evaluated against the selected milestone (or any milestone if none chosen). */
+function recordInPeriod(rec) {
+  const p = STATE.production.period || {};
+  const stage = STATE.production.periodStage || '';
+
+  // No date range set → nothing to filter on
+  if (!p.from && !p.to) return true;
+
+  // Scoped to a specific milestone
+  if (stage) {
+    return !!(rec[stage] && stageInPeriod(rec[stage]));
+  }
+
+  // Any-milestone mode (current default)
+  for (const s of PROD_STAGES) {
+    if (rec[s.key] && stageInPeriod(rec[s.key])) return true;
+  }
+  return false;
+}
+
+function getFilteredProductionRecords() {
+  if (!STATE.production.loaded) return [];
+  const p = STATE.production.period || {};
+  const noPeriodFilter = !p.from && !p.to;
+  const noLineFilter   = !STATE.production.lines;
+  const noModelFilter  = !STATE.production.models;
+  if (noPeriodFilter && noLineFilter && noModelFilter) return STATE.production.records;
+  return STATE.production.records.filter(recordMatchesFilters);
+}
+/* ---- Pending-state staging ---- */
+function isProductionPeriodDirty() {
+  const a = STATE.production.period        || { from: '', to: '' };
+  const p = STATE.production.pendingPeriod || { from: '', to: '' };
+
+  const datesDirty = (a.from || '') !== (p.from || '') ||
+                     (a.to   || '') !== (p.to   || '');
+  const linesDirty  = !setsEqual(STATE.production.lines,  STATE.production.pendingLines);
+  const modelsDirty = !setsEqual(STATE.production.models, STATE.production.pendingModels);
+  const stageDirty  = (STATE.production.periodStage || '') !==
+                      (STATE.production.pendingPeriodStage || '');
+
+  return datesDirty || linesDirty || modelsDirty || stageDirty;
+}
+
+
+function updateApplyButtonState() {
+  const btn = $('#prodPeriodApply');
+  if (!btn) return;
+  if (!STATE.production.loaded) {
+    btn.disabled = true;
+    btn.classList.remove('pending');
+    return;
+  }
+  const dirty = isProductionPeriodDirty();
+  btn.disabled = !dirty;
+  btn.classList.toggle('pending', dirty);
+}
+
+/* Commit pending → applied, re-render once. */
+function applyProductionPeriod() {
+  if (!STATE.production.loaded) return;
+  STATE.production.period = { ...STATE.production.pendingPeriod };
+  STATE.production.lines  = STATE.production.pendingLines
+    ? new Set(STATE.production.pendingLines) : null;
+  STATE.production.models = STATE.production.pendingModels
+    ? new Set(STATE.production.pendingModels) : null;
+  STATE.production.periodStage = STATE.production.pendingPeriodStage || '';   // ← commit stage
+  renderAllProductionViews();
+  updateProductionPeriodHint();
+  updateApplyButtonState();
+}
+
+
+/* Set both applied + pending (used on file load / reset). */
+function setProductionPeriod(from, to, lines = null, models = null, stage = '') {
+  STATE.production.period        = { from: from || '', to: to || '' };
+  STATE.production.pendingPeriod = { from: from || '', to: to || '' };
+  STATE.production.lines         = lines  ? new Set(lines)  : null;
+  STATE.production.pendingLines  = lines  ? new Set(lines)  : null;
+  STATE.production.models        = models ? new Set(models) : null;
+  STATE.production.pendingModels = models ? new Set(models) : null;
+  STATE.production.periodStage        = stage || '';    // ← ADD
+  STATE.production.pendingPeriodStage = stage || '';    // ← ADD
+
+  const fromEl = $('#prodPeriodFrom');
+  const toEl   = $('#prodPeriodTo');
+  const stEl   = $('#prodPeriodStage');
+  if (fromEl) fromEl.value = from || '';
+  if (toEl)   toEl.value   = to   || '';
+  if (stEl)   stEl.value   = stage || '';
+
+  syncMultiselectUI();
+  renderAllProductionViews();
+  updateProductionPeriodHint();
+  updateApplyButtonState();
+}
+
+
+
+function renderAllProductionViews() {
+  renderProductionStats();
+  renderProductionBatchTable();
+  renderProductionVinTable();
+  renderProductionChart();
+}
+
+function updateProductionPeriodHint() {
+  const el = $('#prodPeriodHint');
+  if (!el) return;
+  if (!STATE.production.loaded) { el.textContent = ''; return; }
+
+  const total    = STATE.production.records.length;
+  const filtered = getFilteredProductionRecords().length;
+
+  const p = STATE.production.period || {};
+  let rangeStr = 'full data';
+  if (p.from || p.to) {
+    const fmtD = s => s ? s.split('-').reverse().join('/') : '…';
+    rangeStr = `${fmtD(p.from)} → ${fmtD(p.to)}`;
+  }
+
+  /* Milestone scope */
+  const stageKey = STATE.production.periodStage || '';
+  const stageStr = stageKey
+    ? (PROD_STAGES.find(s => s.key === stageKey)?.label || stageKey)
+    : 'any milestone';
+
+  const lineStr = !STATE.production.lines
+    ? 'all lines'
+    : STATE.production.lines.size === 0 ? 'no lines'
+    : `${STATE.production.lines.size} line${STATE.production.lines.size === 1 ? '' : 's'}`;
+
+  const modelStr = !STATE.production.models
+    ? 'all models'
+    : STATE.production.models.size === 0 ? 'no models'
+    : `${STATE.production.models.size} model${STATE.production.models.size === 1 ? '' : 's'}`;
+
+  const { min, max } = getFileDateBounds();
+  const fileRangeStr = (min && max)
+    ? ` · File range: <span style="color:var(--muted)">${min.split('-').reverse().join('/')} → ${max.split('-').reverse().join('/')}</span>`
+    : '';
+
+  let pendingStr = '';
+  if (isProductionPeriodDirty()) {
+    pendingStr = ` · <b style="color:#d97706">Pending changes — click Apply</b>`;
+  }
+
+  el.innerHTML =
+    `Period: <b>${rangeStr}</b> (on <b>${escapeHtml(stageStr)}</b>) · <b>${lineStr}</b> · <b>${modelStr}</b> · ` +
+    `Showing <b>${fmt(filtered)}</b> of ${fmt(total)} VINs${fileRangeStr}${pendingStr}`;
+}
+/* Rebuild the checkbox lists for Line and Model dropdowns. */
+function renderLineModelOptions() {
+  const lines  = getAvailableLines();
+  const models = getAvailableModels();
+
+  const linesEl  = $('#prodLineValues');
+  const modelsEl = $('#prodModelValues');
+
+  if (linesEl) {
+    linesEl.innerHTML = lines.map(l => `
+      <label class="prod-ms-value">
+        <input type="checkbox" data-kind="line" value="${escapeHtml(l)}" checked />
+        <span>${escapeHtml(l || '—')}</span>
+      </label>`).join('');
+  }
+  if (modelsEl) {
+    modelsEl.innerHTML = models.map(m => `
+      <label class="prod-ms-value" data-model-label="${escapeHtml(m.toLowerCase())}">
+        <input type="checkbox" data-kind="model" value="${escapeHtml(m)}" checked />
+        <span>${escapeHtml(m)}</span>
+      </label>`).join('');
+  }
+  syncMultiselectUI();
+}
+
+/* Reflect current *pending* sets on the checkboxes + button labels. */
+function syncMultiselectUI() {
+  const pl = STATE.production.pendingLines;
+  const pm = STATE.production.pendingModels;
+
+  // Lines
+  const lineChecks = $$('#prodLineValues input[type=checkbox]');
+  lineChecks.forEach(cb => {
+    cb.checked = !pl || pl.has(cb.value);
+  });
+  const lineLabel = $('#prodLineMS .prod-ms-label');
+  if (lineLabel) {
+    const avail = lineChecks.length;
+    const n = pl ? pl.size : avail;
+    lineLabel.textContent =
+      n === 0        ? 'No Lines'
+      : (!pl || n === avail) ? 'All Lines'
+      : n === 1      ? Array.from(pl)[0]
+      : `${n} Lines`;
+  }
+
+  // Models
+  const modelChecks = $$('#prodModelValues input[type=checkbox]');
+  modelChecks.forEach(cb => {
+    cb.checked = !pm || pm.has(cb.value);
+  });
+  const modelLabel = $('#prodModelMS .prod-ms-label');
+  if (modelLabel) {
+    const avail = modelChecks.length;
+    const n = pm ? pm.size : avail;
+    modelLabel.textContent =
+      n === 0        ? 'No Models'
+      : (!pm || n === avail) ? 'All Models'
+      : n === 1      ? Array.from(pm)[0]
+      : `${n} Models`;
+  }
+}
+/* =========================================================
+   RENDER — Overall KPIs
+   ========================================================= */
+function renderProductionStats() {
+  const wrap = $('#prodStats');
+  if (!STATE.production.loaded) {
+    wrap.innerHTML = '<div class="hint" style="margin:0">No production data loaded yet.</div>';
+    return;
+  }
+  const filtered = getFilteredProductionRecords();
+  const total    = filtered.length;
+
+  const batchSet = new Set();
+  for (const r of filtered) batchSet.add(r.batch || '(no batch)');
+
+  // Per-stage count = VINs whose stage timestamp falls inside the period
+  const counts = {};
+  for (const s of PROD_STAGES) {
+    let n = 0;
+    for (const r of filtered) if (stageReachedByPeriod(r[s.key])) n++;
+    counts[s.key] = n;
+  }
+  const complete = counts.compoundOut;
+
+  const kpis = [
+    { label: 'VINs in period', value: fmt(total),
+      sub: `${fmt(batchSet.size)} batches`, color: '#2563eb' },
+    { label: 'Complete', value: fmt(complete),
+      sub: `${total ? (complete / total * 100).toFixed(1) : 0}%`, color: '#059669' },
+    ...PROD_STAGES.map(s => {
+      const n = counts[s.key];
+      const pct = total ? (n / total * 100) : 0;
+      return { label: s.label, value: fmt(n), sub: `${pct.toFixed(1)}%`, color: s.color };
+    })
+  ];
+
+  wrap.innerHTML = kpis.map(k => `
+    <div class="kpi-compact" title="${escapeHtml(k.label)}">
+      <div class="kpi-bar" style="background:${k.color}"></div>
+      <div class="kpi-body">
+        <div class="kpi-label">${escapeHtml(k.label)}</div>
+        <div class="kpi-value">${k.value}<span class="kpi-sub">${k.sub}</span></div>
+      </div>
+    </div>`).join('');
+}
+function prodBatchExpandAll() {
+  PROD_LINE_COLLAPSED.clear();
+  PROD_SPEC_COLLAPSED.clear();
+  PROD_COLOR_COLLAPSED.clear();
+  if (STATE.production.loaded) renderProductionBatchTable();
+}
+
+function prodBatchCollapseAll() {
+  if (!STATE.production.loaded) return;
+  for (const b of STATE.production.batches.values()) {
+    const line  = dominantLine(b);
+    const model = dominantField(b.vins, 'description') || '(no model)';
+    const color = dominantField(b.vins, 'color')       || '(no colour)';
+    const ccode = dominantField(b.vins, 'colorCode')   || '';
+
+    PROD_LINE_COLLAPSED.add(line);
+    PROD_SPEC_COLLAPSED.add(line + '||' + model);
+    PROD_COLOR_COLLAPSED.add(line + '||' + model + '||' + color + '||' + ccode);
+  }
+  renderProductionBatchTable();
+}
+/* ---- Capacity trend chart ---- */
+function bucketKeyFor(dateStr, granularity) {
+  const m = String(dateStr).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return null;
+  const [, y, mo, d] = m;
+  if (granularity === 'day')   return `${y}-${mo}-${d}`;
+  if (granularity === 'month') return `${y}-${mo}`;
+  if (granularity === 'week') {
+    const dt = new Date(Date.UTC(+y, +mo - 1, +d));
+    const day = dt.getUTCDay() || 7;
+    dt.setUTCDate(dt.getUTCDate() + 4 - day);
+    const yStart = new Date(Date.UTC(dt.getUTCFullYear(), 0, 1));
+    const week = Math.ceil((((dt - yStart) / 86400000) + 1) / 7);
+    return `${dt.getUTCFullYear()}-W${String(week).padStart(2, '0')}`;
+  }
+  return null;
+}
+
+function shortBucketLabel(key, granularity) {
+  if (granularity === 'day')   return key.slice(5);        // MM-DD
+  if (granularity === 'month') return key;                 // YYYY-MM
+  return key.replace('-W', ' W');                          // YYYY Wnn
+}
+
+function niceCeil(n) {
+  if (n <= 10) return 10;
+  const mag = Math.pow(10, Math.floor(Math.log10(n)));
+  const r = n / mag;
+  const step = r <= 1 ? 1 : r <= 2 ? 2 : r <= 5 ? 5 : 10;
+  return step * mag;
+}
+
+function renderProductionChart() {
+  const canvas = $('#prodChart');
+  const empty  = $('#prodChartEmpty');
+  if (!canvas) return;
+
+  if (!STATE.production.loaded || !STATE.production.records.length) {
+    canvas.style.display = 'none';
+    empty.style.display = '';
+    empty.textContent = 'No data to plot.';
+    return;
+  }
+
+  const granularity = $('#prodChartGranularity').value;
+  const stageKey    = $('#prodChartStage').value;
+
+
+  const buckets = new Map();
+  for (const r of STATE.production.records) {
+    if (!recordMatchesLineModel(r)) continue;
+    if (!recordInPeriod(r)) continue;              // ← scope filter (line+stage+dates)
+    const t = r[stageKey];
+    if (!t) continue;
+    if (!stageInPeriod(t)) continue;               // ← keep: chart bar must fall in the date range
+    const key = bucketKeyFor(t, granularity);
+    if (!key) continue;
+    buckets.set(key, (buckets.get(key) || 0) + 1);
+  }
+
+  if (!buckets.size) {
+    canvas.style.display = 'none';
+    empty.style.display = '';
+    empty.textContent = 'No timestamps for this stage.';
+    return;
+  }
+
+  canvas.style.display = '';
+  empty.style.display = 'none';
+
+  const entries = Array.from(buckets.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+
+  const dpr  = window.devicePixelRatio || 1;
+  const cssW = Math.max(320, canvas.parentElement.clientWidth - 16);
+  const cssH = 180;
+  canvas.width  = cssW * dpr;
+  canvas.height = cssH * dpr;
+  canvas.style.width  = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const padLeft = 48, padRight = 14, padTop = 14, padBottom = 52;
+  const plotW = cssW - padLeft - padRight;
+  const plotH = cssH - padTop - padBottom;
+
+  const maxVal  = Math.max(...entries.map(e => e[1]));
+  const niceMax = niceCeil(maxVal);
+  const slot    = plotW / entries.length;
+  const gap     = entries.length > 60 ? 1 : entries.length > 30 ? 2 : 4;
+  const barW    = Math.max(1.5, slot - gap);
+
+  /* grid + y-axis labels */
+  ctx.strokeStyle = '#e5e7eb';
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '10px system-ui, sans-serif';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  const gridN = 4;
+  for (let i = 0; i <= gridN; i++) {
+    const v = (niceMax / gridN) * i;
+    const y = padTop + plotH - (v / niceMax) * plotH;
+    ctx.beginPath();
+    ctx.moveTo(padLeft, y + 0.5);
+    ctx.lineTo(padLeft + plotW, y + 0.5);
+    ctx.stroke();
+    ctx.fillText(fmt(Math.round(v)), padLeft - 6, y);
+  }
+
+  /* bars */
+  entries.forEach(([, v], i) => {
+    const x = padLeft + i * slot + (slot - barW) / 2;
+    const h = (v / niceMax) * plotH;
+    const y = padTop + plotH - h;
+    const grad = ctx.createLinearGradient(0, y, 0, y + h);
+    grad.addColorStop(0, '#3b82f6');
+    grad.addColorStop(1, '#1d4ed8');
+    ctx.fillStyle = grad;
+    ctx.fillRect(x, y, barW, h);
+  });
+
+  /* x-axis labels (rotated, sparse) */
+  ctx.fillStyle = '#64748b';
+  const maxLabels = Math.min(entries.length, 14);
+  const labelEvery = Math.max(1, Math.ceil(entries.length / maxLabels));
+  entries.forEach(([k], i) => {
+    if (i % labelEvery !== 0 && i !== entries.length - 1) return;
+    const cx = padLeft + i * slot + slot / 2;
+    ctx.save();
+    ctx.translate(cx, padTop + plotH + 8);
+    ctx.rotate(-Math.PI / 4);
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(shortBucketLabel(k, granularity), 0, 0);
+    ctx.restore();
+  });
+
+  /* hover tooltip */
+  canvas.onmousemove = ev => {
+    const rect = canvas.getBoundingClientRect();
+    const mx = ev.clientX - rect.left;
+    const idx = Math.floor((mx - padLeft) / slot);
+    if (idx < 0 || idx >= entries.length) { canvas.title = ''; return; }
+    const [k, v] = entries[idx];
+    canvas.title = `${shortBucketLabel(k, granularity)} — ${fmt(v)} VINs`;
+  };
+  canvas.onmouseleave = () => { canvas.title = ''; };
+}
+/* =========================================================
+   RENDER — Batch summary
+   ========================================================= */
+function renderProductionBatchTable() {
+  const tree = $('#prodBatchTable');
+  if (!STATE.production.loaded) {
+    tree.innerHTML = '<div class="hint" style="margin:0">No production data loaded.</div>';
+    return;
+  }
+
+  const search = (STATE.production.batchView.search || '').toLowerCase().trim();
+  const filter = STATE.production.batchView.filter;
+
+  /* --- 1. Keep only batches with at least one VIN inside the period --- */
+  let batches = Array.from(STATE.production.batches.values())
+     .filter(b => b.vins.some(recordMatchesFilters));   // ← was recordInPeriod
+
+
+  /* --- 2. Enrich with period counts + dominant line/model/colour --- */
+  const enriched = [];
+  for (const b of batches) {
+    const periodVins = b.vins.filter(recordMatchesFilters);
+    if (!periodVins.length) continue;
+
+    /* Conflict flags — computed across the FULL batch, not just period VINs,
+       so a hidden inconsistency is never masked by the current filter. */
+    const colorConflict = hasFieldConflict(b.vins, 'color')
+                       || hasFieldConflict(b.vins, 'colorCode');
+    const lineConflict  = hasLineConflict(b);
+
+    enriched.push({
+      id:           b.id,
+      allVins:      b.vins,
+      periodVins,
+      periodCounts: batchCountsAsOfPeriod(periodVins),
+      fullCounts:   b.counts,
+      line:      dominantLine(b),
+      model:     dominantField(b.vins, 'description') || '(no model)',
+      color:     dominantField(b.vins, 'color')       || '(no colour)',
+      colorCode: dominantField(b.vins, 'colorCode')   || '',
+      colorConflict,
+      lineConflict
+    });
+  }
+  batches = enriched;
+
+  /* --- 3. Status filter (uses FULL-batch completion, not period) --- */
+  if (filter === 'completed')
+    batches = batches.filter(b => b.allVins.length > 0 &&
+                                 (b.fullCounts.compoundOut || 0) === b.allVins.length);
+  else if (filter === 'inProgress')
+    batches = batches.filter(b => (b.fullCounts.compoundOut || 0) < b.allVins.length);
+
+  /* --- 4. Text search --- */
+  if (search) {
+    batches = batches.filter(b => {
+      if (b.id.toLowerCase().includes(search)) return true;
+      return `${b.line} ${b.model} ${b.color}`.toLowerCase().includes(search);
+    });
+  }
+
+  if (!batches.length) {
+    tree.innerHTML = '<div class="hint" style="margin:16px 0 0">No batches match the current filters.</div>';
+    return;
+  }
+
+  /* --- 5. Group: line → model → colour → batches --- */
+  const lineMap = new Map();
+  for (const b of batches) {
+    if (!lineMap.has(b.line)) lineMap.set(b.line, new Map());
+    const specMap = lineMap.get(b.line);
+
+    if (!specMap.has(b.model)) specMap.set(b.model, new Map());
+    const colorMap = specMap.get(b.model);
+
+    const ckey = b.color + '||' + b.colorCode;
+    if (!colorMap.has(ckey)) colorMap.set(ckey, { color: b.color, colorCode: b.colorCode, batches: [] });
+    colorMap.get(ckey).batches.push(b);
+  }
+
+  const sortedLines = Array.from(lineMap.entries())
+    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+  /* --- 6. Render tree --- */
+  let html = '';
+  for (const [line, specMap] of sortedLines) {
+    const lineBatches   = Array.from(specMap.values()).flatMap(cm =>
+      Array.from(cm.values()).flatMap(cg => cg.batches));
+    const lineVinTotal  = lineBatches.reduce((s, b) => s + b.periodVins.length, 0);
+    const lineComplete  = lineBatches.reduce((s, b) => s + (b.periodCounts.compoundOut || 0), 0);
+    const lineBatchCnt  = lineBatches.length;
+    const lineModelCnt  = specMap.size;
+    const lineOpen      = !PROD_LINE_COLLAPSED.has(line);
+
+    html += `<details class="prod-line-group" data-line="${escapeHtml(line)}" ${lineOpen ? 'open' : ''}>
+      <summary class="prod-line-header">
+        <span class="line-name">${escapeHtml(line)}</span>
+        <span class="line-count">
+          ${lineModelCnt} model${lineModelCnt === 1 ? '' : 's'} ·
+          ${lineBatchCnt} batch${lineBatchCnt === 1 ? '' : 'es'} ·
+          ${fmt(lineVinTotal)} VINs ·
+          <b>${fmt(lineComplete)}</b> complete
+        </span>
+      </summary>
+      <div class="prod-spec-list">`;
+
+    const sortedSpecs = Array.from(specMap.entries())
+      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+    for (const [model, colorMap] of sortedSpecs) {
+      const allBatches   = Array.from(colorMap.values()).flatMap(c => c.batches);
+      const specVinTotal = allBatches.reduce((s, b) => s + b.periodVins.length, 0);
+      const specComplete = allBatches.reduce((s, b) => s + (b.periodCounts.compoundOut || 0), 0);
+      const specBatchCnt = allBatches.length;
+      const specColorCnt = colorMap.size;
+      const specOpen     = !PROD_SPEC_COLLAPSED.has(line + '||' + model);
+
+      html += `<details class="prod-spec-group" data-line="${escapeHtml(line)}" data-spec="${escapeHtml(model)}" ${specOpen ? 'open' : ''}>
+        <summary class="prod-spec-header">
+          <span class="spec-name">${escapeHtml(model)}</span>
+          <span class="spec-count">
+            ${specBatchCnt} batch${specBatchCnt === 1 ? '' : 'es'} ·
+            ${specColorCnt} colour${specColorCnt === 1 ? '' : 's'} ·
+            ${fmt(specVinTotal)} VINs ·
+            <b>${fmt(specComplete)}</b> complete
+          </span>
+        </summary>
+        <div class="prod-color-list">`;
+
+      const sortedColors = Array.from(colorMap.entries())
+        .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+      for (const [ckey, cg] of sortedColors) {
+        const colorVinTotal = cg.batches.reduce((s, b) => s + b.periodVins.length, 0);
+        const colorComplete = cg.batches.reduce((s, b) => s + (b.periodCounts.compoundOut || 0), 0);
+        const colorOpen     = !PROD_COLOR_COLLAPSED.has(line + '||' + model + '||' + ckey);
+
+        html += `<details class="prod-color-group" data-line="${escapeHtml(line)}" data-spec="${escapeHtml(model)}" data-color="${escapeHtml(ckey)}" ${colorOpen ? 'open' : ''}>
+          <summary class="prod-color-header">
+            <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
+            <span class="color-name">${escapeHtml(model)} ${escapeHtml(cg.color)}</span>
+            <span class="color-count">
+              ${cg.batches.length} batch${cg.batches.length === 1 ? '' : 'es'} ·
+              ${fmt(colorVinTotal)} VINs ·
+              <b>${fmt(colorComplete)}</b> complete
+            </span>
+          </summary>
+          <div class="prod-batch-list">
+            <table class="prod-batch-inner-table">
+              <thead>
+                <tr>
+                  <th style="width:32px"></th>
+                  <th>Batch</th>
+                  <th class="num">VINs</th>
+                  ${PROD_STAGES.map(s => `<th class="num" title="${s.label} — VINs that reached this stage as of period end">${s.short}</th>`).join('')}
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody>`;
+
+        const sortedBatches = cg.batches.slice()
+          .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+
+        for (const b of sortedBatches) {
+          const allTotal    = b.allVins.length;
+          const periodTotal = b.periodVins.length;
+          const isOpen      = PROD_BATCH_EXPANDED.has(b.id);
+
+          const vinsCell = (periodTotal === allTotal)
+            ? `${periodTotal}`
+            : `${periodTotal}<small style="color:var(--muted)">/${allTotal}</small>`;
+
+          const stageCells = PROD_STAGES.map(s => {
+            const n   = b.periodCounts[s.key] || 0;
+            const pct = periodTotal ? Math.round(n / periodTotal * 100) : 0;
+            const cls = pct === 100 ? 'ok' : pct > 0 ? 'partial' : 'empty';
+            return `<td class="num"><span class="prod-pct ${cls}">${n}/${periodTotal}</span><small style="color:var(--muted);margin-left:4px">${pct}%</small></td>`;
+          }).join('');
+
+          let status;
+          if ((b.fullCounts.compoundOut || 0) === allTotal && allTotal > 0)
+            status = '<span class="pill ok">COMPLETE</span>';
+          else if ((b.fullCounts.compoundIn || 0) === allTotal && allTotal > 0)
+            status = '<span class="pill" style="background:#dbeafe;color:#1e40af">IN COMPOUND</span>';
+          else
+            status = '<span class="pill warn">IN PROGRESS</span>';
+
+          const rowWarn = (b.colorConflict || b.lineConflict) ? ' row-warning' : '';
+          const warnTitle = [
+            b.colorConflict ? 'Colour mismatch across VINs in this batch.' : '',
+            b.lineConflict  ? 'Production-line mismatch across VINs in this batch.' : ''
+          ].filter(Boolean).join(' ');
+
+          html += `<tr class="prod-batch-row ${isOpen ? 'row-open' : ''}${rowWarn}"
+                       data-batch="${escapeHtml(b.id)}"
+                       ${warnTitle ? `title="${escapeHtml(warnTitle)}"` : ''}>
+            <td class="prod-batch-toggle-cell">
+              <button class="btn tiny prod-batch-toggle" data-batch="${escapeHtml(b.id)}"
+                      title="${isOpen ? 'Hide VIN details' : 'Show VIN details'}">
+                ${isOpen ? '▾' : '▸'}
+              </button>
+            </td>
+            <td><b class="mono">${escapeHtml(b.id)}</b></td>
+            <td class="num">${vinsCell}</td>
+            ${stageCells}
+            <td>${status}</td>
+          </tr>`;
+
+          if (isOpen) {
+            const vins = b.periodVins.slice().sort((x, y) => {
+              const c = String(x.sequence || '').localeCompare(String(y.sequence || ''), undefined, { numeric: true });
+              return c || displayVin(x).localeCompare(displayVin(y));
+            });
+
+            const colspan = 4 + PROD_STAGES.length;
+
+            html += `<tr class="prod-batch-detail-row">
+              <td colspan="${colspan}">
+                <div class="prod-batch-detail">
+                  <div class="prod-batch-detail-title">
+                    VINs in <b>${escapeHtml(b.id)}</b> — ${vins.length} vehicle${vins.length === 1 ? '' : 's'} in period
+                  </div>
+                  <div class="table-wrap prod-batch-detail-scroll">
+                    <table class="prod-batch-detail-table">
+                      <thead>
+                        <tr>
+                          <th>Seq</th>
+                          <th>VIN</th>
+                          <th>Line</th>
+                          <th>Colour</th>
+                          ${PROD_STAGES.map(s => `<th class="prod-time-col" title="${s.label}">${s.label}</th>`).join('')}
+                          <th>Timeline</th>
+                        </tr>
+                      </thead>
+                      <tbody>`;
+
+            for (const r of vins) {
+              const lineOf = lineOfSequence(r.sequence);
+              const dots = PROD_STAGES.map(s =>
+                r[s.key]
+                  ? `<span class="prod-dot" style="background:${s.color}" title="${s.label}: ${escapeHtml(r[s.key])}"></span>`
+                  : `<span class="prod-dot empty" title="${s.label}: —"></span>`
+              ).join('');
+              html += `<tr>
+                <td class="mono">${escapeHtml(r.sequence || '—')}</td>
+                <td class="mono">${escapeHtml(displayVin(r))}</td>
+                <td>${escapeHtml(lineOf)}</td>
+                <td>${escapeHtml(r.color || '—')}</td>
+                ${PROD_STAGES.map(s => `<td class="prod-time-col">${formatProdTime(r[s.key])}</td>`).join('')}
+                <td><div class="prod-timeline">${dots}</div></td>
+              </tr>`;
+            }
+
+            html += `</tbody></table></div></div></td></tr>`;
+          }
+        }
+
+        html += `</tbody></table></div></details>`;
+      }
+
+      html += `</div></details>`;
+    }
+
+    html += `</div></details>`;
+  }
+
+  tree.innerHTML = html;
+
+  /* --- 7. Wire up interactions --- */
+
+  tree.querySelectorAll('.prod-batch-toggle').forEach(btn => {
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const id = btn.dataset.batch;
+      if (PROD_BATCH_EXPANDED.has(id)) PROD_BATCH_EXPANDED.delete(id);
+      else                             PROD_BATCH_EXPANDED.add(id);
+      renderProductionBatchTable();
+    });
+  });
+
+  tree.querySelectorAll('.prod-batch-row').forEach(row => {
+    row.addEventListener('click', e => {
+      if (e.target.closest('button')) return;
+      const id = row.dataset.batch;
+      if (PROD_BATCH_EXPANDED.has(id)) PROD_BATCH_EXPANDED.delete(id);
+      else                             PROD_BATCH_EXPANDED.add(id);
+      renderProductionBatchTable();
+    });
+  });
+
+  tree.querySelectorAll('details.prod-line-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.line;
+      if (d.open) PROD_LINE_COLLAPSED.delete(key);
+      else        PROD_LINE_COLLAPSED.add(key);
+    });
+  });
+
+  tree.querySelectorAll('details.prod-spec-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.line + '||' + d.dataset.spec;
+      if (d.open) PROD_SPEC_COLLAPSED.delete(key);
+      else        PROD_SPEC_COLLAPSED.add(key);
+    });
+  });
+
+  tree.querySelectorAll('details.prod-color-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.line + '||' + d.dataset.spec + '||' + d.dataset.color;
+      if (d.open) PROD_COLOR_COLLAPSED.delete(key);
+      else        PROD_COLOR_COLLAPSED.add(key);
+    });
+  });
+}
+/* =========================================================
+   RENDER — VIN detail (paginated)
+   ========================================================= */
+function getFilteredProductionVins() {
+  const v = STATE.production.vinView;
+  const search = (v.search || '').toLowerCase();
+  let rows = getFilteredProductionRecords();      // ← was STATE.production.records
+
+  if (search) {
+    rows = rows.filter(r =>
+      `${r.code} ${r.batch} ${r.sequence} ${r.description} ${r.color} ${r.materialCode}`
+        .toLowerCase().includes(search));
+  }
+  switch (v.stage) {
+    case 'complete':       rows = rows.filter(r => r.compoundOut); break;
+    case 'notDev':         rows = rows.filter(r => !r.devanning); break;
+    case 'notTrim':        rows = rows.filter(r => !r.trimIn); break;
+    case 'notOff':         rows = rows.filter(r => !r.offLine); break;
+    case 'notBuyOff':      rows = rows.filter(r => !r.buyOff); break;
+    case 'notCompoundIn':  rows = rows.filter(r => !r.compoundIn); break;
+    case 'notCompoundOut': rows = rows.filter(r => !r.compoundOut); break;
+  }
+  return rows;
+}
+
+function renderProductionVinTable() {
+  const tbl = $('#prodVinTable');
+  const pg  = $('#prodVinPagination');
+  if (!STATE.production.loaded) {
+    tbl.innerHTML = `<thead><tr><th>No production data loaded</th></tr></thead>`;
+    pg.innerHTML = '';
+    $('#prodVinCount').textContent = '';
+    return;
+  }
+  const v = STATE.production.vinView;
+
+  const filtered = getFilteredProductionVins().slice().sort((a, b) => {
+    const c = (a.batch || '').localeCompare(b.batch || '', undefined, { numeric: true });
+    return c || (a.code || '').localeCompare(b.code || '');
+  });
+
+  const total = filtered.length;
+  const totalPages = Math.max(1, Math.ceil(total / v.pageSize));
+  if (v.page > totalPages) v.page = totalPages;
+  const start = (v.page - 1) * v.pageSize;
+  const pageRows = filtered.slice(start, start + v.pageSize);
+
+  $('#prodVinCount').innerHTML =
+    `<b>${fmt(total)}</b> VIN${total === 1 ? '' : 's'} match · showing ${fmt(start + 1)}–${fmt(Math.min(start + v.pageSize, total))}`;
+
+  const head = `
+    <thead><tr>
+      <th>VIN</th>
+      <th>Seq</th>
+      <th>Line</th>
+      <th>Batch</th>
+      <th>Model / Color</th>
+      ${PROD_STAGES.map(s => `<th class="prod-time-col" title="${s.label}">${s.label}</th>`).join('')}
+      <th>Timeline</th>
+    </tr></thead>`;
+
+  const body = pageRows.map(r => {
+    const line = lineOfSequence(r.sequence);
+    const timeline = PROD_STAGES.map(s =>
+      r[s.key]
+        ? `<span class="prod-dot" style="background:${s.color}" title="${s.label}: ${escapeHtml(r[s.key])}"></span>`
+        : `<span class="prod-dot empty" title="${s.label}: —"></span>`
+    ).join('');
+    return `<tr>
+      <td class="mono">${escapeHtml(displayVin(r))}</td>
+      <td class="mono">${escapeHtml(r.sequence || '—')}</td>
+      <td>${escapeHtml(line)}</td>
+      <td class="mono">${escapeHtml(r.batch || '—')}</td>
+      <td>${escapeHtml(r.description || '')}${r.color ? ` — <span style="color:var(--muted)">${escapeHtml(r.color)}</span>` : ''}</td>
+      ${PROD_STAGES.map(s => `<td class="prod-time-col">${formatProdTime(r[s.key])}</td>`).join('')}
+      <td><div class="prod-timeline">${timeline}</div></td>
+    </tr>`;
+  }).join('');
+
+  tbl.innerHTML = head + `<tbody>${
+    body || `<tr><td colspan="${6 + PROD_STAGES.length}" style="text-align:center;color:#6b7280;padding:16px">No VINs match the current filters</td></tr>`
+  }</tbody>`;
+
+  renderPagination(pg, v.page, totalPages, p => {
+    v.page = p;
+    renderProductionVinTable();
+    tbl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+}
+
+function renderPagination(container, page, total, onChange) {
+  if (total <= 1) { container.innerHTML = ''; return; }
+  const btns = [];
+  const win = 5;
+  let start = Math.max(1, page - 2);
+  let end = Math.min(total, start + win - 1);
+  if (end - start < win - 1) start = Math.max(1, end - win + 1);
+
+  btns.push(`<button class="btn tiny" data-p="${page - 1}" ${page <= 1 ? 'disabled' : ''}>‹ Prev</button>`);
+  if (start > 1) {
+    btns.push(`<button class="btn tiny" data-p="1">1</button>`);
+    if (start > 2) btns.push(`<span class="pg-dots">…</span>`);
+  }
+  for (let i = start; i <= end; i++) {
+    btns.push(`<button class="btn tiny ${i === page ? 'primary' : ''}" data-p="${i}">${i}</button>`);
+  }
+  if (end < total) {
+    if (end < total - 1) btns.push(`<span class="pg-dots">…</span>`);
+    btns.push(`<button class="btn tiny" data-p="${total}">${total}</button>`);
+  }
+  btns.push(`<button class="btn tiny" data-p="${page + 1}" ${page >= total ? 'disabled' : ''}>Next ›</button>`);
+
+  container.innerHTML = btns.join('');
+  container.querySelectorAll('button[data-p]').forEach(b => {
+    b.addEventListener('click', () => {
+      const p = parseInt(b.dataset.p, 10);
+      if (p >= 1 && p <= total && p !== page) onChange(p);
+    });
+  });
+}
+
+/* =========================================================
+   EXPORTS
+   ========================================================= */
+function exportProductionBatches() {
+  if (!STATE.production.loaded) return;
+  const aoa = [['Batch', 'VINs', ...PROD_STAGES.map(s => s.label), 'Status']];
+  const batches = Array.from(STATE.production.batches.values())
+    .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+  for (const b of batches) {
+    const total = b.vins.length;
+    const row = [b.id, total];
+    for (const s of PROD_STAGES) row.push(b.counts[s.key] || 0);
+    row.push((b.counts.compoundOut || 0) === total && total > 0 ? 'COMPLETE' : 'IN PROGRESS');
+    aoa.push(row);
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Batch Progress');
+  downloadWorkbook(wb, `Production_Batches_${dateStamp()}.xlsx`);
+}
+
+function exportProductionVins() {
+  if (!STATE.production.loaded) return;
+  const rows = getFilteredProductionVins();
+  const aoa = [[
+    'VIN', 'Sequence', 'Line', 'Batch', 'Description', 'Color', 'Material Code',
+    ...PROD_STAGES.map(s => s.label)
+  ]];
+  for (const r of rows) {
+    aoa.push([
+      displayVin(r), r.sequence, lineOfSequence(r.sequence), r.batch,
+      r.description, r.color, r.materialCode,
+      ...PROD_STAGES.map(s => r[s.key] || '')
+    ]);
+  }
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'VIN Tracking');
+  downloadWorkbook(wb, `Production_VINs_${dateStamp()}.xlsx`);
+}
+/* Count of period-selected VINs that had reached each stage as of period.to.
+   Numerator and denominator share the same scope (periodVins), so percentages
+   are always 0–100%. */
+function batchCountsAsOfPeriod(periodVins) {
+  const counts = {};
+  for (const s of PROD_STAGES) counts[s.key] = 0;
+  if (!periodVins || !periodVins.length) return counts;
+  for (const r of periodVins) {
+    for (const s of PROD_STAGES) {
+      if (stageReachedByPeriod(r[s.key])) counts[s.key]++;
+    }
+  }
+  return counts;
+}
+/* =========================================================
+   XML EXPORT — one file per VIN in the current VIN detail list
+   ========================================================= */
+let _exportFolderHandle = null;
+let _lastXmlErrors = [];
+
+/* XML-safe text */
+function escapeXml(s) {
+  if (s == null) return '';
+  return String(s).replace(/[<>&'"]/g, c => ({
+    '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;'
+  })[c]);
+}
+
+/* 'YYYY-MM-DD…' → 'YYYYMMDD' */
+function toYmdCompact(dateStr) {
+  if (!dateStr) return '';
+  const m = String(dateStr).match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return '';
+  return `${m[1]}${m[2]}${m[3]}`;
+}
+
+/* Strip characters that are illegal in most filesystems */
+function sanitizeFileName(name) {
+  return String(name || '')
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 180);
+}
+
+function populateBatchLineFilter() {
+  const sel = $('#batchLineFilter');
+  if (!sel) return;
+  const lines = new Set();
+  for (const b of STATE.batches) lines.add(b._line || '(no line)');
+  const sorted = Array.from(lines).sort();
+  const current = sel.value;
+  sel.innerHTML =
+    `<option value="">All lines (${STATE.batches.length} batches)</option>` +
+    sorted.map(l => {
+      const n = STATE.batches.filter(b => (b._line || '(no line)') === l).length;
+      return `<option value="${escapeHtml(l)}">${escapeHtml(l)} — ${n} batch${n === 1 ? '' : 'es'}</option>`;
+    }).join('');
+  sel.value = sorted.includes(current) ? current : '';
+}
+
+/* Build the XML string for one VIN, one <InventoryLine> per BOM part. */
+function buildXMLForVin(rec, bom) {
+  const zone         = lineOfSequence(rec.sequence);
+  const deliveryNote = `${rec.sequence}-${displayVin(rec)}`;
+  const order        = rec.batch || '';
+  const stockDate    = toYmdCompact(rec.offLine);
+
+  const lines = bom.parts.map(p => `    <InventoryLine>
+        <Type>CONSUME</Type>
+        <Zone>${escapeXml(zone)}</Zone>
+        <Warehouse>EBR</Warehouse>
+        <COResponsible>WH</COResponsible>
+        <COInventoryReason>JC</COInventoryReason>
+        <DeliveryNote>${escapeXml(deliveryNote)}</DeliveryNote>
+        <CONotes>NOTES</CONotes>
+        <Part>${escapeXml(p.partNo)}</Part>
+        <StockAV>${Number(p.qty) || 0}</StockAV>
+        <Order>${escapeXml(order)}</Order>
+        <StockDate>${stockDate}</StockDate>
+    </InventoryLine>`).join('\n');
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<Inventory>
+${lines}
+</Inventory>
+`;
+}
+
+/* Folder picker (File System Access API, write mode) */
+async function pickExportFolder() {
+  if (typeof window.showDirectoryPicker !== 'function') {
+    alert('XML folder export requires Chrome or Edge (File System Access API).');
+    return;
+  }
+  try {
+    const handle = await window.showDirectoryPicker({ mode: 'readwrite' });                      
+    _exportFolderHandle = handle;
+    await saveFileHandle('exportFolder', handle);
+    renderAllFileChips(); renderStoredFilesTab();
+    $('#exportFolderPath').value = '/' + handle.name + '/';
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    console.error(e);
+    alert('Failed to select folder: ' + e.message);
+  }
+}
+
+async function exportProductionXml() {
+  /* ---- Pre-flight checks ---- */
+  if (!STATE.production.loaded) {
+    alert('Load production tracking data first.');
+    return;
+  }
+  if (!STATE.boms.length) {
+    alert('Please load BOM data first.');
+    return;
+  }
+  const vins = getFilteredProductionVins();
+  if (!vins.length) {
+    alert('No VINs match the current filters.');
+    return;
+  }
+
+  /* ---- Ensure a folder is selected + writable ---- */
+  if (!_exportFolderHandle) {
+    await pickExportFolder();
+    if (!_exportFolderHandle) return;
+  }
+  try {
+    let perm = await _exportFolderHandle.queryPermission({ mode: 'readwrite' });
+    if (perm !== 'granted') {
+      perm = await _exportFolderHandle.requestPermission({ mode: 'readwrite' });
+    }
+    if (perm !== 'granted') {
+      alert('Write permission to the folder was not granted.');
+      return;
+    }
+  } catch (e) {
+    console.error(e);
+    alert('Could not verify folder permission: ' + e.message);
+    return;
+  }
+
+  /* ---- Reset UI ---- */
+  const wrap   = $('#xmlProgressWrap');
+  const fill   = $('#xmlProgressFill');
+  const label  = $('#xmlProgressLabel');
+  const errBox = $('#xmlErrorLog');
+
+  wrap.classList.remove('hidden');
+  errBox.classList.add('hidden');
+  errBox.innerHTML = '';
+  fill.style.width = '0%';
+  label.textContent = `Preparing 0 / ${vins.length}…`;
+
+  _lastXmlErrors = [];
+
+  /* ---- Live error-log helpers (nested — closure over errBox) ---- */
+  const ensureErrorPanel = () => {
+    if (errBox.dataset.built === '1') return;
+    errBox.dataset.built = '1';
+    errBox.classList.remove('hidden');
+    errBox.innerHTML = `
+      <div class="xml-err-title">
+        <span id="xmlErrCount">⚠ 0 errors</span>
+        <span class="xml-err-actions">
+          <button type="button" id="xmlErrExport" title="Export errors to Excel">⤓ Export Errors</button>
+          <button type="button" id="xmlErrClose" title="Dismiss">✕</button>
+        </span>
+      </div>
+      <div class="xml-err-rows" id="xmlErrRows">
+        <div class="xml-err-row xml-err-header">
+          <span>VIN</span><span>Batch</span><span>Reason</span>
+        </div>
+      </div>`;
+    $('#xmlErrExport').addEventListener('click', exportXmlErrors);
+    $('#xmlErrClose').addEventListener('click', () => {
+      errBox.classList.add('hidden');
+      errBox.innerHTML = '';
+      errBox.dataset.built = '';
+    });
+  };
+
+  const appendErrorRow = (er) => {
+    ensureErrorPanel();
+    const rows = $('#xmlErrRows');
+    const row = document.createElement('div');
+    row.className = 'xml-err-row';
+    row.innerHTML = `
+      <span class="xml-err-vin">${escapeHtml(er.vin)}</span>
+      <span class="xml-err-batch">${escapeHtml(er.batch)}</span>
+      <span>${escapeHtml(er.reason)}</span>`;
+    rows.appendChild(row);
+    const countEl = $('#xmlErrCount');
+    if (countEl) {
+      const n = _lastXmlErrors.length;
+      countEl.textContent = `⚠ ${n} error${n === 1 ? '' : 's'}`;
+    }
+  };
+
+  /* ---- Process every VIN ---- */
+  let successCount = 0;
+  const total = vins.length;
+
+  for (let i = 0; i < total; i++) {
+    const rec = vins[i];
+
+    /* --- Sequence + VIN required --- */
+    const seq = String(rec.sequence || '').trim();
+    const vin = displayVin(rec);
+    if (!seq || !vin) {
+      const missing = [];
+      if (!seq) missing.push('Sequence');
+      if (!vin) missing.push('VIN');
+      const er = {
+        vin:   vin || '(missing)',
+        batch: rec.batch || '—',
+        reason: `Missing ${missing.join(' and ')} field(s)`
+      };
+      _lastXmlErrors.push(er);
+      appendErrorRow(er);
+      await yieldToUI();
+      continue;
+    }
+
+    /* --- BOM lookup by batch --- */
+    const matches = STATE.boms.filter(b => b.batchId === rec.batch);
+    if (matches.length === 0) {
+      const er = {
+        vin, batch: rec.batch || '—',
+        reason: `No BOM loaded for sales batch ${rec.batch || '—'}`
+      };
+      _lastXmlErrors.push(er);
+      appendErrorRow(er);
+      await yieldToUI();
+      continue;
+    }
+    if (matches.length > 1) {
+      const er = {
+        vin, batch: rec.batch || '—',
+        reason: 'Multi BOM detected for the Batch, please check'
+      };
+      _lastXmlErrors.push(er);
+      appendErrorRow(er);
+      await yieldToUI();
+      continue;
+    }
+    const bom = matches[0];
+    if (!bom.parts || !bom.parts.length) {
+      const er = { vin, batch: rec.batch || '—', reason: 'BOM has no parts' };
+      _lastXmlErrors.push(er);
+      appendErrorRow(er);
+      await yieldToUI();
+      continue;
+    }
+
+    /* --- Build XML + write --- */
+    const xmlStr   = buildXMLForVin(rec, bom);
+    const fileName = sanitizeFileName(`${seq}-${vin}`) + '.xml';
+
+    try {
+      const fh = await _exportFolderHandle.getFileHandle(fileName, { create: true });
+      const w  = await fh.createWritable();
+      await w.write(xmlStr);
+      await w.close();
+      successCount++;
+    } catch (e) {
+      console.error(e);
+      const er = {
+        vin, batch: rec.batch || '—',
+        reason: `Write failed: ${e.message || e}`
+      };
+      _lastXmlErrors.push(er);
+      appendErrorRow(er);
+      await yieldToUI();
+    }
+
+    /* --- Throttled progress update --- */
+    if (i % 5 === 0 || i === total - 1) {
+      fill.style.width = (((i + 1) / total) * 100).toFixed(1) + '%';
+      label.textContent = `Exporting ${i + 1} / ${total} — ${fileName}`;
+      await yieldToUI();
+    }
+  }
+
+  /* ---- Wrap-up ---- */
+  fill.style.width = '100%';
+  label.textContent =
+    `Done — ${successCount} processed correctly, ${_lastXmlErrors.length} with error${_lastXmlErrors.length === 1 ? '' : 's'}.`;
+
+  alert(
+    `XML export complete.\n` +
+    `${successCount} processed correctly, ${_lastXmlErrors.length} ended with error.\n` +
+    (_lastXmlErrors.length ? 'Please check the error log for details.' : '')
+  );
+
+  setTimeout(() => wrap.classList.add('hidden'), 3000);
+}
+
+function exportXmlErrors() {
+  if (!_lastXmlErrors || !_lastXmlErrors.length) {
+    alert('No errors to export.');
+    return;
+  }
+  const aoa = [['#', 'VIN', 'Batch', 'Reason']];
+  _lastXmlErrors.forEach((er, i) => {
+    aoa.push([i + 1, er.vin, er.batch, er.reason]);
+  });
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'XML Export Errors');
+  downloadWorkbook(wb, `XML_Export_Errors_${dateStamp()}.xlsx`);
+}
+/* =========================================================
+   BIND — Production tab UI
+   ========================================================= */
+function bindProduction() {
+  const dz    = $('#prodDrop');
+  const input = $('#prodInput');
+  if (!dz || !input) return;
+
+  /* --- File input --- */
+  input.addEventListener('change', e => {
+    handleProductionFiles(Array.from(e.target.files || []));
+    e.target.value = '';
+  });
+  ['dragenter', 'dragover'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); dz.classList.add('drag');
+  }));
+  ['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, e => {
+    e.preventDefault(); dz.classList.remove('drag');
+  }));
+  dz.addEventListener('drop', e => {
+    handleProductionFiles(Array.from(e.dataTransfer.files || []));
+  });
+
+  /* --- Batch summary controls --- */
+  $('#prodBatchSearch').addEventListener('input', e => {
+    STATE.production.batchView.search = e.target.value;
+    renderProductionBatchTable();
+  });
+  $('#prodBatchFilter').addEventListener('change', e => {
+    STATE.production.batchView.filter = e.target.value;
+    renderProductionBatchTable();
+  });
+  $('#prodBatchExpandAll').addEventListener('click', prodBatchExpandAll);
+  $('#prodBatchCollapseAll').addEventListener('click', prodBatchCollapseAll);
+
+  /* --- VIN detail controls --- */
+  $('#prodVinSearch').addEventListener('input', e => {
+    STATE.production.vinView.search = e.target.value;
+    STATE.production.vinView.page = 1;
+    renderProductionVinTable();
+  });
+  $('#prodVinStage').addEventListener('change', e => {
+    STATE.production.vinView.stage = e.target.value;
+    STATE.production.vinView.page = 1;
+    renderProductionVinTable();
+  });
+
+  /* --- Exports --- */
+  $('#prodBatchExport').addEventListener('click', exportProductionBatches);
+  $('#prodVinExport').addEventListener('click', exportProductionVins);
+  /* --- XML Export --- */
+  $('#exportFolderPick').addEventListener('click', pickExportFolder);
+  $('#prodXmlExport').addEventListener('click', exportProductionXml);
+  /* --- Capacity chart selectors --- */
+  $('#prodChartGranularity').addEventListener('change', renderProductionChart);
+  $('#prodChartStage').addEventListener('change',       renderProductionChart);
+
+  /* --- Monitoring period: quick-range buttons (stage only) --- ;*/
+  const periodCtrl = $('#prodPeriodControls');
+  if (periodCtrl) {
+    periodCtrl.addEventListener('click', e => {
+      const btn = e.target.closest('button[data-range]');
+      if (!btn || !periodCtrl.contains(btn)) return;
+
+      const { from, to } = getPeriodRange(btn.dataset.range);
+
+      const fromEl = $('#prodPeriodFrom');
+      const toEl   = $('#prodPeriodTo');
+      if (fromEl) fromEl.value = from || '';
+      if (toEl)   toEl.value   = to   || '';
+      STATE.production.pendingPeriod = { from: from || '', to: to || '' };
+
+      periodCtrl.querySelectorAll('button[data-range]').forEach(b =>
+        b.classList.remove('primary'));
+      btn.classList.add('primary');
+
+      updateApplyButtonState();
+    });
+  }
+
+  /* --- Manual date edits: stage only --- */
+  const stageFromInputs = () => {
+    const fromEl = $('#prodPeriodFrom');
+    const toEl   = $('#prodPeriodTo');
+    STATE.production.pendingPeriod = {
+      from: fromEl ? (fromEl.value || '') : '',
+      to:   toEl   ? (toEl.value   || '') : ''
+    };
+    $$('.prod-period-btn').forEach(b => b.classList.remove('primary'));
+    updateApplyButtonState();
+  };
+  $('#prodPeriodFrom').addEventListener('change', stageFromInputs);
+  $('#prodPeriodTo').addEventListener('change', stageFromInputs);
+   
+  /* --- Milestone scope for the period (stage only) --- */
+  $('#prodPeriodStage').addEventListener('change', e => {
+    STATE.production.pendingPeriodStage = e.target.value || '';
+    updateApplyButtonState();
+  });
+  /* --- Line / Model multi-select dropdowns --- */
+  const closeAllMS = () => {
+    $$('.prod-ms-panel').forEach(p => p.classList.add('hidden'));
+  };
+  ['#prodLineMS', '#prodModelMS'].forEach(sel => {
+    const root = $(sel);
+    if (!root) return;
+    const btn   = root.querySelector('.prod-ms-btn');
+    const panel = root.querySelector('.prod-ms-panel');
+    btn.addEventListener('click', e => {
+      e.stopPropagation();
+      const wasHidden = panel.classList.contains('hidden');
+      closeAllMS();
+      if (wasHidden) panel.classList.remove('hidden');
+    });
+    panel.addEventListener('click', e => e.stopPropagation());
+  });
+  document.addEventListener('click', closeAllMS);
+
+  /* Checkbox changes → update pending sets, no re-render */
+  const onChangeMS = () => {
+    const lineChecks  = $$('#prodLineValues input[type=checkbox]');
+    const modelChecks = $$('#prodModelValues input[type=checkbox]');
+
+    const selectedLines  = lineChecks.filter(c => c.checked).map(c => c.value);
+    const selectedModels = modelChecks.filter(c => c.checked).map(c => c.value);
+
+    STATE.production.pendingLines  = selectedLines.length  === lineChecks.length  ? null : new Set(selectedLines);
+    STATE.production.pendingModels = selectedModels.length === modelChecks.length ? null : new Set(selectedModels);
+
+    syncMultiselectUI();
+    updateApplyButtonState();
+  };
+  $('#prodLineValues')?.addEventListener('change', e => {
+    if (e.target.matches('input[type=checkbox]')) onChangeMS();
+  });
+  $('#prodModelValues')?.addEventListener('change', e => {
+    if (e.target.matches('input[type=checkbox]')) onChangeMS();
+  });
+
+  /* All / None quick buttons inside each panel */
+  $$('.prod-ms-header').forEach(header => {
+    header.addEventListener('click', e => {
+      const btn = e.target.closest('button[data-act]');
+      if (!btn) return;
+      e.stopPropagation();
+      const root = header.closest('.prod-ms');
+      const checks = root.querySelectorAll('input[type=checkbox]');
+      const setAll = btn.dataset.act === 'all';
+      checks.forEach(cb => { cb.checked = setAll; });
+      onChangeMS();
+    });
+  });
+
+  /* Model search input */
+  const modelSearch = $('#prodModelMS .prod-ms-search input');
+  if (modelSearch) {
+    modelSearch.addEventListener('input', e => {
+      const q = e.target.value.toLowerCase();
+      $$('#prodModelValues .prod-ms-value').forEach(lbl => {
+        const hay = lbl.dataset.modelLabel || '';
+        lbl.style.display = hay.includes(q) ? '' : 'none';
+      });
+    });
+  }
+
+  /* --- Apply button: commit all pending filters --- */
+  $('#prodPeriodApply').addEventListener('click', () => {
+    applyProductionPeriod();
+    closeAllMS();
+  });
+
+  /* --- Clear button --- */
+  $('#prodClear').addEventListener('click', clearProduction);
+
+  /* --- Redraw chart on resize --- */
+  window.addEventListener('resize', () => {
+    if (STATE.production.loaded) renderProductionChart();
+  });
+}
+/* =========================================================
+   PLAN vs EXECUTION — Comparison
+   ========================================================= */
+
+/* Earliest ISO timestamp for a milestone across a list of VIN records. */
+function earliestMilestone(vins, key) {
+  let min = null;
+  if (!vins || !vins.length) return null;
+  for (const r of vins) {
+    const t = r[key];
+    if (!t) continue;
+    if (min === null || t < min) min = t;
+  }
+  return min;
+}
+
+/* Best-effort date parsing for both Date objects and ISO strings. */
+function toDateAny(v) {
+  if (!v) return null;
+  const d = (v instanceof Date) ? v : new Date(v);
+  return isNaN(d) ? null : d;
+}
+
+/* Build the comparison rows once; reused by render + export. */
+function buildComparisonRows() {
+  const invMap = new Map();
+  for (const b of STATE.batches) invMap.set(b.batch, b);
+
+  const prodMap = new Map();
+  for (const [id, pb] of STATE.production.batches) {
+    if (!id || id.startsWith('(no batch)')) continue;      // skip orphan VINs
+    prodMap.set(id, pb);
+  }
+
+  const ids = new Set([...invMap.keys(), ...prodMap.keys()]);
+  const rows = [];
+
+  for (const id of ids) {
+    const inv  = invMap.get(id);
+    const prod = prodMap.get(id);
+
+    /* ---- Plan (Inventory & Stock) ---- */
+    const planQty        = inv ? (inv.qty || 0) : 0;
+    const planModel      = inv?.model       || '';
+    const planColor      = inv?.color       || '';
+    const planColorCode  = inv?.colorCode   || '';
+    const planLine       = inv?._line       || '';
+    const planStage      = inv?._stage      || '';
+    const planTrimIn     = inv?.trimIn      || null;
+    const planArrival    = inv?.arrival     || null;
+    const planDecanting  = inv?.decanting   || null;
+
+    /* ---- Execution (Production Monitoring) ---- */
+    const actualVins   = prod ? prod.vins.length : 0;
+    const actualModel  = prod ? dominantField(prod.vins, 'description') : '';
+    const actualColor     = prod ? dominantField(prod.vins, 'color')     : '';
+    const actualColorCode = prod ? dominantField(prod.vins, 'colorCode') : '';
+    const actualLine   = prod ? dominantLine(prod) : '';
+
+    const actualDev      = prod ? earliestMilestone(prod.vins, 'devanning')   : null;
+    const actualTrim     = prod ? earliestMilestone(prod.vins, 'trimIn')      : null;
+    const actualOff      = prod ? earliestMilestone(prod.vins, 'offLine')     : null;
+    const actualBuyOff   = prod ? earliestMilestone(prod.vins, 'buyOff')      : null;
+    const actualCin      = prod ? earliestMilestone(prod.vins, 'compoundIn')  : null;
+    const actualCot      = prod ? earliestMilestone(prod.vins, 'compoundOut') : null;
+
+    const actualComplete = prod ? (prod.counts.compoundOut || 0) : 0;
+    const progressPct    = actualVins ? Math.round(actualComplete / actualVins * 100) : 0;
+
+    /* ---- Variance computations ---- */
+    const qtyVariance   = actualVins - planQty;
+
+    let trimDeltaDays = null;
+    const pTrim = toDateAny(planTrimIn);
+    const aTrim = toDateAny(actualTrim);
+    if (pTrim && aTrim) {
+      const ms = aTrim.getTime() - pTrim.getTime();
+      trimDeltaDays = Math.round(ms / 86400000);
+    }
+
+    /* ---- Status ---- */
+    let status, statusKey;
+    if (inv && prod) {
+      if (qtyVariance === 0) { status = 'MATCHED'; statusKey = 'matched'; }
+      else                   { status = 'QTY VARIANCE'; statusKey = 'variance'; }
+    } else if (inv) {
+      status = 'PLAN ONLY'; statusKey = 'planOnly';
+    } else {
+      status = 'EXEC ONLY'; statusKey = 'execOnly';
+    }
+
+    rows.push({
+      id, inv, prod,
+      planQty, planModel, planColor, planColorCode, planLine, planStage,
+      planTrimIn, planArrival, planDecanting,
+      actualVins, actualModel, actualColor, actualColorCode, actualLine,
+      actualDev, actualTrim, actualOff, actualBuyOff, actualCin, actualCot,
+      progressPct, qtyVariance, trimDeltaDays,
+      status, statusKey
+    });
+  }
+
+  return rows;
+}
+
+/* Recompute the summary cards. */
+function renderCompStats(rows) {
+  const el = $('#compStats');
+  if (!el) return;
+
+  if (!STATE.batches.length && !STATE.production.batches.size) {
+    el.innerHTML = '<div class="hint" style="margin:0">Load a batch/shipment file and a production tracking file to see the comparison.</div>';
+    return;
+  }
+
+  const planBatches  = rows.filter(r => r.inv).length;
+  const execBatches  = rows.filter(r => r.prod).length;
+  const matched      = rows.filter(r => r.statusKey === 'matched').length;
+  const variance     = rows.filter(r => r.statusKey === 'variance').length;
+  const planOnly     = rows.filter(r => r.statusKey === 'planOnly').length;
+  const execOnly     = rows.filter(r => r.statusKey === 'execOnly').length;
+  const totalPlan    = rows.reduce((s, r) => s + r.planQty, 0);
+  const totalActual  = rows.reduce((s, r) => s + r.actualVins, 0);
+  const totalDelta   = totalActual - totalPlan;
+
+  const deltaClass = totalDelta === 0 ? 'comp-delta-ok'
+                   : totalDelta > 0   ? 'comp-delta-pos'
+                   : 'comp-delta-neg';
+
+  el.innerHTML = `
+    <div class="stat">
+      <div class="label">Batches in plan</div>
+      <div class="value">${fmt(planBatches)}</div>
+      <div class="sub"><b>${fmt(totalPlan)}</b> vehicles planned</div>
+    </div>
+    <div class="stat">
+      <div class="label">Batches in execution</div>
+      <div class="value">${fmt(execBatches)}</div>
+      <div class="sub"><b>${fmt(totalActual)}</b> VINs tracked</div>
+    </div>
+    <div class="stat">
+      <div class="label">Volume delta</div>
+      <div class="value ${deltaClass}">${totalDelta >= 0 ? '+' : ''}${fmt(totalDelta)}</div>
+      <div class="sub">exec − plan</div>
+    </div>
+    <div class="stat">
+      <div class="label">Matched</div>
+      <div class="value" style="color:var(--ok)">${fmt(matched)}</div>
+      <div class="sub">plan = execution</div>
+    </div>
+    <div class="stat">
+      <div class="label">Qty variance</div>
+      <div class="value" style="color:${variance ? 'var(--warn)' : 'inherit'}">${fmt(variance)}</div>
+      <div class="sub">plan ≠ execution</div>
+    </div>
+    <div class="stat">
+      <div class="label">Plan only</div>
+      <div class="value" style="color:${planOnly ? '#1e40af' : 'inherit'}">${fmt(planOnly)}</div>
+      <div class="sub">no production yet</div>
+    </div>
+    <div class="stat">
+      <div class="label">Exec only</div>
+      <div class="value" style="color:${execOnly ? '#6b21a8' : 'inherit'}">${fmt(execOnly)}</div>
+      <div class="sub">no plan on file</div>
+    </div>
+  `;
+}
+function refreshComparisonIfVisible() {
+  const panel = document.getElementById('panel-comparison');
+  if (panel && panel.classList.contains('active')) renderComparison();
+}
+/* Main renderer. */
+function renderComparison() {
+  const tree = $('#compTable');
+  if (!tree) return;
+
+  const rows = buildComparisonRows();
+  renderCompStats(rows);
+
+  if (!rows.length) {
+    tree.innerHTML = '<div class="hint" style="margin:0">Load a batch/shipment file and a production tracking file to see the comparison.</div>';
+    return;
+  }
+
+  const search       = ($('#compSearch')?.value || '').trim().toLowerCase();
+  const statusFilter = $('#compStatus')?.value || 'all';
+
+  /* --- Filter --- */
+  let filtered = rows;
+  if (statusFilter === 'matched')          filtered = filtered.filter(r => r.statusKey === 'matched');
+  else if (statusFilter === 'qtyVariance') filtered = filtered.filter(r => r.statusKey === 'variance');
+  else if (statusFilter === 'planOnly')    filtered = filtered.filter(r => r.statusKey === 'planOnly');
+  else if (statusFilter === 'execOnly')    filtered = filtered.filter(r => r.statusKey === 'execOnly');
+  else if (statusFilter === 'issues')      filtered = filtered.filter(r => r.statusKey !== 'matched');
+
+  if (search) {
+    filtered = filtered.filter(r =>
+      `${r.id} ${r.planModel} ${r.planColor} ${r.planLine} ${r.actualModel} ${r.actualColor} ${r.actualLine}`
+        .toLowerCase().includes(search));
+  }
+
+  if (!filtered.length) {
+    tree.innerHTML = '<div class="hint" style="margin:8px 0 0">No batches match the current filters.</div>';
+    return;
+  }
+
+  /* --- Grouping keys: prefer Plan, fall back to Execution --- */
+  const lineOf  = r => r.planLine  || r.actualLine  || '(no line)';
+  const modelOf = r => r.planModel || r.actualModel || '(no model)';
+  const colorOf = r => r.planColor || r.actualColor || '(no colour)';
+  const codeOf  = r => r.planColorCode || r.actualColorCode || '';
+
+  /* --- Build Line → Model → Colour → rows --- */
+  const lineMap = new Map();
+  for (const r of filtered) {
+    const line = lineOf(r);
+    const model = modelOf(r);
+    const ckey = colorOf(r) + '||' + codeOf(r);
+
+    if (!lineMap.has(line)) lineMap.set(line, new Map());
+    const modelMap = lineMap.get(line);
+
+    if (!modelMap.has(model)) modelMap.set(model, new Map());
+    const colorMap = modelMap.get(model);
+
+    if (!colorMap.has(ckey)) {
+      colorMap.set(ckey, { color: colorOf(r), colorCode: codeOf(r), rows: [] });
+    }
+    colorMap.get(ckey).rows.push(r);
+  }
+
+  const sortedLines = Array.from(lineMap.entries())
+    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+  /* --- Columns inside each colour group (line/model/colour promoted) --- */
+  const innerCols = [
+    { id: 'batch',     label: 'Batch',          align: '' },
+    { id: 'status',    label: 'Status',         align: '' },
+    { id: 'planQty',   label: 'Plan Qty',       align: 'num' },
+    { id: 'actualVins',label: 'Actual VINs',    align: 'num' },
+    { id: 'delta',     label: 'Δ',              align: 'num' },
+    { id: 'progress',  label: 'Progress',       align: 'num' },
+    { id: 'planStage', label: 'Plan Stage',     align: '' },
+    { id: 'planTrim',  label: 'Plan Trim-in',   align: '' },
+    { id: 'actualTrim',label: 'Actual Trim-in', align: '' },
+    { id: 'trimDelta', label: 'Trim Δ (d)',     align: 'num' }
+  ];
+
+  /* --- Render --- */
+  let html = '';
+  for (const [line, modelMap] of sortedLines) {
+    const lineRows = [];
+    for (const cm of modelMap.values())
+      for (const cg of cm.values())
+        lineRows.push(...cg.rows);
+
+    const lineQty    = lineRows.reduce((s, r) => s + r.planQty, 0);
+    const lineActual = lineRows.reduce((s, r) => s + r.actualVins, 0);
+    const lineDelta  = lineActual - lineQty;
+    const lineOpen   = !COMP_LINE_COLLAPSED.has(line);
+
+    /* Line-level conflict: any batch in this line whose plan line ≠ exec line */
+    const lineHasConflict = lineRows.some(r =>
+      r.planLine && r.actualLine && r.planLine !== r.actualLine);
+
+    html += `<details class="prod-line-group batch-line-group"
+                     data-line="${escapeHtml(line)}"
+                     ${lineOpen ? 'open' : ''}>
+      <summary class="prod-line-header">
+        <span class="line-name">${escapeHtml(line)}${lineHasConflict ? ' ⚠' : ''}</span>
+        <span class="line-count">
+          ${modelMap.size} model${modelMap.size === 1 ? '' : 's'} ·
+          ${lineRows.length} batch${lineRows.length === 1 ? '' : 'es'} ·
+          <b>${fmt(lineQty)}</b> planned ·
+          <b>${fmt(lineActual)}</b> actual ·
+          <span class="${lineDelta === 0 ? 'comp-delta-ok' : lineDelta > 0 ? 'comp-delta-pos' : 'comp-delta-neg'}">
+            ${lineDelta >= 0 ? '+' : ''}${fmt(lineDelta)} Δ
+          </span>
+        </span>
+      </summary>
+      <div class="prod-spec-list">`;
+
+    const sortedModelEntries = Array.from(modelMap.entries())
+      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+    for (const [model, colorMap] of sortedModelEntries) {
+      const modelRows = [];
+      for (const cg of colorMap.values()) modelRows.push(...cg.rows);
+
+      const modelQty    = modelRows.reduce((s, r) => s + r.planQty, 0);
+      const modelActual = modelRows.reduce((s, r) => s + r.actualVins, 0);
+      const modelDelta  = modelActual - modelQty;
+      const modelKey    = line + '||' + model;
+      const modelOpen   = !COMP_MODEL_COLLAPSED.has(modelKey);
+
+      html += `<details class="prod-spec-group batch-model-group"
+                       data-line="${escapeHtml(line)}"
+                       data-model="${escapeHtml(model)}"
+                       ${modelOpen ? 'open' : ''}>
+        <summary class="prod-spec-header">
+          <span class="spec-name">${escapeHtml(model)}</span>
+          <span class="spec-count">
+            ${modelRows.length} batch${modelRows.length === 1 ? '' : 'es'} ·
+            ${colorMap.size} colour${colorMap.size === 1 ? '' : 's'} ·
+            <b>${fmt(modelQty)}</b> planned ·
+            <b>${fmt(modelActual)}</b> actual ·
+            <span class="${modelDelta === 0 ? 'comp-delta-ok' : modelDelta > 0 ? 'comp-delta-pos' : 'comp-delta-neg'}">
+              ${modelDelta >= 0 ? '+' : ''}${fmt(modelDelta)} Δ
+            </span>
+          </span>
+        </summary>
+        <div class="prod-color-list">`;
+
+      const sortedColorEntries = Array.from(colorMap.entries())
+        .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+      for (const [ckey, cg] of sortedColorEntries) {
+        const colorQty    = cg.rows.reduce((s, r) => s + r.planQty, 0);
+        const colorActual = cg.rows.reduce((s, r) => s + r.actualVins, 0);
+        const colorDelta  = colorActual - colorQty;
+        const colorKey    = line + '||' + model + '||' + ckey;
+        const colorOpen   = !COMP_COLOR_COLLAPSED.has(colorKey);
+
+        html += `<details class="prod-color-group batch-color-group"
+                         data-line="${escapeHtml(line)}"
+                         data-model="${escapeHtml(model)}"
+                         data-color="${escapeHtml(ckey)}"
+                         ${colorOpen ? 'open' : ''}>
+          <summary class="prod-color-header">
+            <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
+            <span class="color-name">${escapeHtml(model)} ${escapeHtml(cg.color)}</span>
+            <span class="color-count">
+              ${cg.rows.length} batch${cg.rows.length === 1 ? '' : 'es'} ·
+              <b>${fmt(colorQty)}</b> planned ·
+              <b>${fmt(colorActual)}</b> actual ·
+              <span class="${colorDelta === 0 ? 'comp-delta-ok' : colorDelta > 0 ? 'comp-delta-pos' : 'comp-delta-neg'}">
+                ${colorDelta >= 0 ? '+' : ''}${fmt(colorDelta)} Δ
+              </span>
+            </span>
+          </summary>
+          <div class="prod-batch-list">
+            <table class="prod-batch-inner-table">
+              <thead>
+                <tr>
+                  ${innerCols.map(c =>
+                    `<th class="${c.align || ''}">${escapeHtml(c.label)}</th>`
+                  ).join('')}
+                </tr>
+              </thead>
+              <tbody>`;
+
+        const sortedRows = cg.rows.slice()
+          .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+
+        for (const r of sortedRows) {
+          /* Status pill */
+          const statusCell = `<span class="comp-status ${r.statusKey}">${escapeHtml(r.status)}</span>`;
+
+          /* Δ qty */
+          const dv = r.qtyVariance;
+          const deltaClass = dv === 0 ? 'comp-delta-ok'
+                           : dv > 0   ? 'comp-delta-pos'
+                           : 'comp-delta-neg';
+          const deltaCell = dv === 0
+            ? '<span class="comp-delta-ok">0</span>'
+            : `<span class="${deltaClass}">${dv > 0 ? '+' : ''}${fmt(dv)}</span>`;
+
+          /* Trim-in Δ (days) */
+          const tdv = r.trimDeltaDays;
+          const trimDeltaCell = (tdv === null)
+            ? '—'
+            : tdv === 0
+              ? '<span class="comp-delta-ok">0</span>'
+              : `<span class="${tdv > 0 ? 'comp-delta-neg' : 'comp-delta-pos'}">${tdv > 0 ? '+' : ''}${tdv}</span>`;
+
+          /* Plan stage label */
+          const stageLabel = r.planStage
+            ? (STATE.config.stages[r.planStage]?.label || r.planStage)
+            : '—';
+
+          /* Line-conflict flag (only when it happens inside a batch) */
+          const innerConflict = r.planLine && r.actualLine && r.planLine !== r.actualLine;
+          const rowClass = (r.statusKey !== 'matched' || innerConflict) ? 'comp-row-issues' : '';
+
+          const cells = {
+            batch:      `<td class="mono">${escapeHtml(r.id)}</td>`,
+            status:     `<td>${statusCell}</td>`,
+            planQty:    `<td class="num">${fmt(r.planQty)}</td>`,
+            actualVins: `<td class="num">${fmt(r.actualVins)}</td>`,
+            delta:      `<td class="num">${deltaCell}</td>`,
+            progress:   `<td class="num">${r.prod ? r.progressPct + '%' : '—'}</td>`,
+            planStage:  `<td>${escapeHtml(stageLabel)}</td>`,
+            planTrim:   `<td>${r.planTrimIn ? fmtDate(r.planTrimIn) : '—'}</td>`,
+            actualTrim: `<td>${r.actualTrim ? fmtDate(new Date(r.actualTrim)) : '—'}</td>`,
+            trimDelta:  `<td class="num">${trimDeltaCell}</td>`
+          };
+
+          html += `<tr class="${rowClass}" data-batch="${escapeHtml(r.id)}"
+                       ${innerConflict
+                         ? `title="Plan line ${escapeHtml(r.planLine)} ≠ execution line ${escapeHtml(r.actualLine)}"`
+                         : ''}>
+            ${innerCols.map(c => cells[c.id] || '<td></td>').join('')}
+          </tr>`;
+        }
+
+        html += `</tbody></table></div></details>`;
+      }
+
+      html += `</div></details>`;
+    }
+
+    html += `</div></details>`;
+  }
+
+  tree.innerHTML = html;
+
+  /* --- Persist collapse state --- */
+  tree.querySelectorAll('details.batch-line-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.line;
+      if (d.open) COMP_LINE_COLLAPSED.delete(key);
+      else        COMP_LINE_COLLAPSED.add(key);
+    });
+  });
+  tree.querySelectorAll('details.batch-model-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.line + '||' + d.dataset.model;
+      if (d.open) COMP_MODEL_COLLAPSED.delete(key);
+      else        COMP_MODEL_COLLAPSED.add(key);
+    });
+  });
+  tree.querySelectorAll('details.batch-color-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const key = d.dataset.line + '||' + d.dataset.model + '||' + d.dataset.color;
+      if (d.open) COMP_COLOR_COLLAPSED.delete(key);
+      else        COMP_COLOR_COLLAPSED.add(key);
+    });
+  });
+}
+
+function compExpandAll() {
+  COMP_LINE_COLLAPSED.clear();
+  COMP_MODEL_COLLAPSED.clear();
+  COMP_COLOR_COLLAPSED.clear();
+  renderComparison();
+}
+
+function compCollapseAll() {
+  const rows = buildComparisonRows();
+  const lineSet  = new Set();
+  const modelSet = new Set();
+
+  for (const r of rows) {
+    const line  = r.planLine  || r.actualLine  || '(no line)';
+    const model = r.planModel || r.actualModel || '(no model)';
+    const color = r.planColor || r.actualColor || '(no colour)';
+    const ccode = r.planColorCode || '';
+
+    lineSet.add(line);
+    modelSet.add(line + '||' + model);
+    COMP_COLOR_COLLAPSED.add(line + '||' + model + '||' + color + '||' + ccode);
+  }
+  for (const l of lineSet)  COMP_LINE_COLLAPSED.add(l);
+  for (const m of modelSet) COMP_MODEL_COLLAPSED.add(m);
+
+  renderComparison();
+}
+/* Excel export of the comparison table. */
+function exportComparison() {
+  const rows = buildComparisonRows()
+    .slice()
+    .sort((a, b) => a.id.localeCompare(b.id, undefined, { numeric: true }));
+
+  if (!rows.length) {
+    alert('Nothing to export.');
+    return;
+  }
+
+  const aoa = [[
+    'Batch', 'Status', 'Line', 'Model', 'Colour', 'Colour Code',
+    'Plan Qty', 'Actual VINs', 'Δ Qty', 'Progress %',
+    'Plan Stage',
+    'Plan Trim-in', 'Actual Trim-in', 'Trim Δ (days)',
+    'Plan Arrival', 'Plan Decanting',
+    'Actual 005 De-vanning', 'Actual 020 Trim-in', 'Actual 030 Off-line OK',
+    'Actual Buy-off OK', 'Actual Compound Gate-in', 'Actual Compound Gate-out OK'
+  ]];
+
+  for (const r of rows) {
+    aoa.push([
+      r.id, r.status, r.planLine || r.actualLine,
+      r.planModel || r.actualModel, r.planColor || r.actualColor, r.planColorCode,
+      r.planQty, r.actualVins, r.qtyVariance,
+      r.prod ? r.progressPct : '',
+      r.planStage,
+      r.planTrimIn ? fmtDate(r.planTrimIn) : '',
+      r.actualTrim ? fmtDate(new Date(r.actualTrim)) : '',
+      r.trimDeltaDays === null ? '' : r.trimDeltaDays,
+      r.planArrival   ? fmtDate(r.planArrival)   : '',
+      r.planDecanting ? fmtDate(r.planDecanting) : '',
+      r.actualDev    ? fmtDate(new Date(r.actualDev))    : '',
+      r.actualTrim   ? fmtDate(new Date(r.actualTrim))   : '',
+      r.actualOff    ? fmtDate(new Date(r.actualOff))    : '',
+      r.actualBuyOff ? fmtDate(new Date(r.actualBuyOff)) : '',
+      r.actualCin    ? fmtDate(new Date(r.actualCin))    : '',
+      r.actualCot    ? fmtDate(new Date(r.actualCot))    : ''
+    ]);
+  }
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Plan vs Execution');
+  downloadWorkbook(wb, `Plan_vs_Execution_${dateStamp()}.xlsx`);
+}
+
+/* Bind comparison tab UI. */
+function bindComparison() {
+  $('#compSearch')?.addEventListener('input', renderComparison);
+  $('#compStatus')?.addEventListener('change', renderComparison);
+  $('#compExpandAll')?.addEventListener('click', compExpandAll);
+  $('#compCollapseAll')?.addEventListener('click', compCollapseAll);
+  $('#compClear')?.addEventListener('click', () => {
+    const s = $('#compSearch'); if (s) s.value = '';
+    const st = $('#compStatus'); if (st) st.value = 'all';
+    renderComparison();
+  });
+  $('#compExport')?.addEventListener('click', exportComparison);
+}
+
+/* Permission helpers — safe on browsers without FSA. */
+
+
+/* =========================================================
+   STORED FILES — unified registry & IndexedDB accessors
+   ========================================================= */
+const FILE_DB    = 'mrp.fileHandles.v2';
+const FILE_STORE = 'files';
+
+const STORED_SLOTS = {
+  bomFolder:      { label: 'BOM folder',                kind: 'directory', mode: 'read',
+                    tab: 'bomlist',    chipEl: '#fileChip-bomFolder',
+                    pickFn: 'pickBomFolder',        reloadFn: 'reloadBomFolderFromHandle' },
+  batchFile:      { label: 'Batch / shipment file',     kind: 'file',      mode: 'read',
+                    tab: 'inventory',  chipEl: '#fileChip-batchFile',
+                    pickFn: 'pickBatchFile',        reloadFn: 'reloadBatchFromHandle' },
+  productionFile: { label: 'Production tracking file',  kind: 'file',      mode: 'read',
+                    tab: 'production', chipEl: '#fileChip-productionFile',
+                    pickFn: 'pickProductionFile',   reloadFn: 'reloadProductionFromHandle' },
+  exportFolder:   { label: 'XML export folder',         kind: 'directory', mode: 'readwrite',
+                    tab: 'production', chipEl: '#fileChip-exportFolder',
+                    pickFn: 'pickExportFolder',     reloadFn: 'reloadExportFolderFromHandle' }
+};
+
+function openFileDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(FILE_DB, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(FILE_STORE)) db.createObjectStore(FILE_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => reject(req.error);
+  });
+}
+async function saveFileHandle(key, handle) {
+  const db = await openFileDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(FILE_STORE, 'readwrite');
+    tx.objectStore(FILE_STORE).put(handle, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror    = () => reject(tx.error);
+  });
+}
+async function loadFileHandle(key) {
+  const db = await openFileDB();
+  return new Promise((resolve, reject) => {
+    const tx  = db.transaction(FILE_STORE, 'readonly');
+    const req = tx.objectStore(FILE_STORE).get(key);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror   = () => reject(req.error);
+  });
+}
+async function removeFileHandle(key) {
+  const db = await openFileDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(FILE_STORE, 'readwrite');
+    tx.objectStore(FILE_STORE).delete(key);
+    tx.oncomplete = () => resolve();
+    tx.onerror    = () => reject(tx.error);
+  });
+}
+async function getSlotStatus(slotKey) {
+  const slot = STORED_SLOTS[slotKey];
+  const handle = await loadFileHandle(slotKey);
+  if (!handle) return { handle: null, perm: 'absent' };
+  const perm = await handle.queryPermission({ mode: slot.mode });
+  return { handle, perm };
+}
+
+/* ---------- Pickers with persistence ---------- */
+async function pickBatchFile() {
+  if (typeof window.showOpenFilePicker !== 'function') { $('#batchInput').click(); return; }
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      types: [{ description: 'Batch / shipment file',
+                accept: { 'text/csv': ['.csv', '.tsv'],
+                          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+                          'application/vnd.ms-excel': ['.xls'] } }]
+    });
+    await saveFileHandle('batchFile', handle);
+    await reloadBatchFromHandle(handle);
+    renderAllFileChips(); renderStoredFilesTab();
+  } catch (e) {
+    if (e.name !== 'AbortError') { console.error(e); alert('Failed to pick file: ' + e.message); }
+  }
+}
+async function reloadBatchFromHandle(handle) {
+  if (!handle) return;
+  let perm = await handle.queryPermission({ mode: 'read' });
+  if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'read' });
+  if (perm !== 'granted') return;
+
+  const f = await handle.getFile();
+  const p = $('#batchFilePath'); if (p) p.value = f.name;
+  const i = $('#batchFileInfo'); if (i) i.textContent = `Loading ${f.name}…`;
+
+  await handleBatchFiles([f]);
+
+  if (i) i.textContent = `Loaded — ${STATE.batches.length} batches.`;
+  await renderAllFileChips();
+  await renderStoredFilesTab();
+}
+
+async function pickProductionFile() {
+  if (typeof window.showOpenFilePicker !== 'function') { $('#prodInput').click(); return; }
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      types: [{ description: 'Production tracking file',
+                accept: { 'text/csv': ['.csv', '.tsv'], 'text/plain': ['.txt'] } }]
+    });
+    await saveFileHandle('productionFile', handle);
+    await reloadProductionFromHandle(handle);
+    renderAllFileChips(); renderStoredFilesTab();
+  } catch (e) {
+    if (e.name !== 'AbortError') { console.error(e); alert('Failed to pick file: ' + e.message); }
+  }
+}
+async function reloadProductionFromHandle(handle) {
+  if (!handle) return;
+  let perm = await handle.queryPermission({ mode: 'read' });
+  if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'read' });
+  if (perm !== 'granted') return;
+
+  const f = await handle.getFile();
+  const p = $('#prodFilePath'); if (p) p.value = f.name;
+  const i = $('#prodFileInfo'); if (i) i.textContent = `Loading ${f.name}…`;
+
+  await handleProductionFiles([f]);
+
+  if (i) i.textContent =
+    `Loaded — ${STATE.production.records.length} VINs · ` +
+    `${STATE.production.batches.size} batches.`;
+  await renderAllFileChips();
+  await renderStoredFilesTab();
+}
+
+async function reloadBomFolderFromHandle(handle) {
+  if (!handle) return;
+  let perm = await handle.queryPermission({ mode: 'read' });
+  if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'read' });
+  if (perm !== 'granted') return;
+  _bomFolderHandle = handle;
+  _bomFolderFiles = [];
+  $('#bomFolderPath').value = '/' + handle.name + '/';
+  $('#bomFolderInfo').textContent = 'Scanning stored folder…';
+  $('#bomFolderProcess').disabled = true;
+  await walkDirectory(handle, '');
+  updateFolderInfo();
+  await processBomFolder();
+}
+
+async function reloadExportFolderFromHandle(handle) {
+  if (!handle) return;
+  let perm = await handle.queryPermission({ mode: 'readwrite' });
+  if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'readwrite' });
+  if (perm !== 'granted') return;
+  _exportFolderHandle = handle;
+  $('#exportFolderPath').value = '/' + handle.name + '/';
+}
+
+async function reloadSlot(key, handle) {
+  switch (key) {
+    case 'bomFolder':      return reloadBomFolderFromHandle(handle);
+    case 'batchFile':      return reloadBatchFromHandle(handle);
+    case 'productionFile': return reloadProductionFromHandle(handle);
+    case 'exportFolder':   return reloadExportFolderFromHandle(handle);
+  }
+}
+
+/* ---------- Per-tab chips ---------- */
+async function renderTabFileChip(slotKey) {
+  const slot = STORED_SLOTS[slotKey];
+  if (!slot || !slot.chipEl) return;
+  const el = $(slot.chipEl);
+  if (!el) return;
+
+  const { handle, perm } = await getSlotStatus(slotKey);
+  const dotClass = perm === 'granted' ? 'connected'
+                 : perm === 'prompt'  ? 'prompt'
+                 : perm === 'denied'  ? 'denied'
+                 : 'absent';
+  const hint = perm === 'granted' ? 'Connected'
+             : perm === 'prompt'  ? 'Click to reconnect'
+             : perm === 'denied'  ? 'Permission denied'
+             : 'No file selected';
+
+  let button = '';
+  if (!handle)                  button = `<button class="fc-action" data-role="chip-pick"      data-slot="${slotKey}">Choose file</button>`;
+  else if (perm === 'granted')  button = `<button class="fc-action" data-role="chip-reload"    data-slot="${slotKey}">Reload</button>`;
+  else if (perm === 'prompt')   button = `<button class="fc-action" data-role="chip-reconnect" data-slot="${slotKey}">Reconnect</button>`;
+  else                          button = `<button class="fc-action" data-role="chip-pick"      data-slot="${slotKey}">Re-pick</button>`;
+
+  el.innerHTML = `
+    <span class="file-chip ${dotClass}">
+      <span class="fc-dot"></span>
+      <span class="fc-label">${escapeHtml(slot.label)}</span>
+      <span class="fc-name" title="${handle ? escapeHtml(handle.name) : ''}">${handle ? escapeHtml(handle.name) : '—'}</span>
+      <span class="fc-hint">${escapeHtml(hint)}</span>
+      ${button}
+    </span>`;
+
+  el.querySelector('button[data-role]')?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const role     = e.target.dataset.role;
+    const slotKey2 = e.target.dataset.slot;
+    const slot2    = STORED_SLOTS[slotKey2];
+
+    if (role === 'chip-pick') {
+      const fn = window[slot2.pickFn];
+      if (typeof fn === 'function') fn();
+      return;
+    }
+    const h = await loadFileHandle(slotKey2);
+    if (!h) return;
+    if (role === 'chip-reconnect') {
+      const p = await h.requestPermission({ mode: slot2.mode });
+      if (p !== 'granted') { await renderTabFileChip(slotKey2); return; }
+    }
+    const fn = window[slot2.reloadFn];
+    if (typeof fn === 'function') await fn(h);
+    await renderAllFileChips();
+  });
+}
+async function renderAllFileChips() {
+  for (const k of Object.keys(STORED_SLOTS)) await renderTabFileChip(k);
+}
+
+/* ---------- Stored Files tab ---------- */
+async function renderStoredFilesTab() {
+  const tbl = $('#sfTable');
+  if (!tbl) return;
+
+  const rows = [];
+  for (const [slotKey, slot] of Object.entries(STORED_SLOTS)) {
+    const { handle, perm } = await getSlotStatus(slotKey);
+    let size = '—', modified = '—';
+    if (handle && handle.kind === 'file' && perm !== 'absent') {
+      try {
+        const f = await handle.getFile();
+        size     = f.size < 1048576
+          ? (f.size / 1024).toFixed(1) + ' KB'
+          : (f.size / 1048576).toFixed(2) + ' MB';
+        modified = fmtDateTime(new Date(f.lastModified));
+      } catch { size = 'n/a'; modified = 'n/a'; }
+    }
+    rows.push({ slotKey, slot, handle, perm, size, modified });
+  }
+
+  const badge = p =>
+    p === 'granted' ? '<span class="sf-badge ok">Connected</span>' :
+    p === 'prompt'  ? '<span class="sf-badge prompt">Reconnect needed</span>' :
+    p === 'denied'  ? '<span class="sf-badge denied">Denied</span>' :
+                      '<span class="sf-badge absent">Not stored</span>';
+
+  tbl.innerHTML = `
+    <thead><tr>
+      <th>File</th><th>Used in tab</th><th>Name</th><th>Type</th>
+      <th>Status</th><th>Size</th><th>Last modified</th>
+      <th style="text-align:right">Actions</th>
+    </tr></thead>
+    <tbody>
+      ${rows.map(r => {
+        const tabLabel = {
+          bomlist: 'BOM List', inventory: 'Inventory & Stock', production: 'Production Monitoring'
+        }[r.slot.tab] || r.slot.tab;
+
+        const actions = [];
+        if (r.handle) {
+          if (r.perm === 'granted')
+            actions.push(`<button class="btn tiny" data-role="reload" data-slot="${r.slotKey}">↻ Reload</button>`);
+          else if (r.perm === 'prompt')
+            actions.push(`<button class="btn tiny primary" data-role="reconnect" data-slot="${r.slotKey}">🔓 Reconnect</button>`);
+          else
+            actions.push(`<button class="btn tiny" data-role="repick" data-slot="${r.slotKey}">🔄 Re-pick</button>`);
+          actions.push(`<button class="btn tiny danger" data-role="forget" data-slot="${r.slotKey}">✕ Forget</button>`);
+        } else {
+          actions.push(`<button class="btn tiny primary" data-role="repick" data-slot="${r.slotKey}">📁 Choose file</button>`);
+        }
+
+        return `
+          <tr>
+            <td>${escapeHtml(r.slot.label)}</td>
+            <td>${escapeHtml(tabLabel)}</td>
+            <td class="mono">${r.handle ? escapeHtml(r.handle.name) : '—'}</td>
+            <td><span class="sf-badge kind">${escapeHtml(r.slot.kind)}</span></td>
+            <td>${badge(r.perm)}</td>
+            <td class="num">${escapeHtml(r.size)}</td>
+            <td>${escapeHtml(r.modified)}</td>
+            <td style="text-align:right"><span class="sf-actions">${actions.join('')}</span></td>
+          </tr>`;
+      }).join('')}
+    </tbody>`;
+
+  tbl.querySelectorAll('button[data-role]').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const slotKey = btn.dataset.slot;
+      const slot    = STORED_SLOTS[slotKey];
+      const role    = btn.dataset.role;
+
+      if (role === 'forget') {
+        if (!confirm(`Forget the stored handle for "${slot.label}"?`)) return;
+        await removeFileHandle(slotKey);
+        await renderAllFileChips();
+        await renderStoredFilesTab();
+        return;
+      }
+      if (role === 'repick') {
+        const fn = window[slot.pickFn];
+        if (typeof fn === 'function') fn();
+        return;
+      }
+      const h = await loadFileHandle(slotKey);
+      if (!h) return;
+      let p = await h.queryPermission({ mode: slot.mode });
+      if (p !== 'granted') p = await h.requestPermission({ mode: slot.mode });
+      if (p !== 'granted') { renderStoredFilesTab(); return; }
+      const fn = window[slot.reloadFn];
+      if (typeof fn === 'function') {
+        btn.disabled = true;
+        const orig = btn.textContent;
+        btn.textContent = '…';
+        try { await fn(h); }
+        catch (e) { console.error(e); alert('Reload failed: ' + e.message); }
+        btn.disabled = false;
+        btn.textContent = orig;
+      }
+      await renderAllFileChips();
+      await renderStoredFilesTab();
+    });
+  });
+}
+
+function bindStoredFilesTab() {
+  $('#sfReloadAll')?.addEventListener('click', async () => {
+    for (const [slotKey, slot] of Object.entries(STORED_SLOTS)) {
+      const { handle, perm } = await getSlotStatus(slotKey);
+      if (!handle || perm !== 'granted') continue;
+      const fn = window[slot.reloadFn];
+      if (typeof fn === 'function') {
+        try { await fn(handle); } catch (e) { console.error(slotKey, e); }
+      }
+    }
+    await renderAllFileChips();
+    await renderStoredFilesTab();
+  });
+  $('#sfForgetAll')?.addEventListener('click', async () => {
+    if (!confirm('Forget every stored file handle? You will need to pick them again next session.')) return;
+    for (const k of Object.keys(STORED_SLOTS)) await removeFileHandle(k);
+    _bomFolderHandle    = null;
+    _exportFolderHandle = null;
+    await renderAllFileChips();
+    await renderStoredFilesTab();
+  });
+}
+/* Wire the Choose file / Process file buttons in the Inventory and
+   Production Monitoring sections. */
+function bindPersistentFileSlots() {
+
+  /* ---- Inventory & Stock — Batch file ---- */
+  const bPick    = $('#batchFilePick');
+  const bProcess = $('#batchFileProcess');
+  const bInfo    = $('#batchFileInfo');
+
+  bPick?.addEventListener('click', () => pickBatchFile());
+
+  bProcess?.addEventListener('click', async () => {
+    const { handle, perm } = await getSlotStatus('batchFile');
+    if (!handle) { alert('No batch file stored yet. Click Choose file.'); return; }
+
+    let p = perm;
+    if (p !== 'granted') {
+      p = await handle.requestPermission({ mode: 'read' });
+    }
+    if (p !== 'granted') {
+      if (bInfo) bInfo.textContent = 'Permission denied — click Choose file to re-select.';
+      return;
+    }
+    if (bInfo) bInfo.textContent = 'Loading…';
+    try {
+      const file = await handle.getFile();
+      await handleBatchFiles([file]);
+      if (bInfo) bInfo.textContent = `Loaded — ${STATE.batches.length} batches.`;
+    } catch (e) {
+      console.error(e);
+      if (bInfo) bInfo.textContent = 'Load failed: ' + (e.message || e);
+    }
+    renderAllFileChips();
+  });
+
+  /* ---- Production Monitoring — Tracking file ---- */
+  const pPick    = $('#prodFilePick');
+  const pProcess = $('#prodFileProcess');
+  const pInfo    = $('#prodFileInfo');
+
+  pPick?.addEventListener('click', () => pickProductionFile());
+
+  pProcess?.addEventListener('click', async () => {
+    const { handle, perm } = await getSlotStatus('productionFile');
+    if (!handle) { alert('No production file stored yet. Click Choose file.'); return; }
+
+    let p = perm;
+    if (p !== 'granted') {
+      p = await handle.requestPermission({ mode: 'read' });
+    }
+    if (p !== 'granted') {
+      if (pInfo) pInfo.textContent = 'Permission denied — click Choose file to re-select.';
+      return;
+    }
+    if (pInfo) pInfo.textContent = 'Parsing…';
+    try {
+      const file = await handle.getFile();
+      await handleProductionFiles([file]);
+      if (pInfo) pInfo.textContent =
+        `Loaded — ${STATE.production.records.length} VINs · ` +
+        `${STATE.production.batches.size} batches.`;
+    } catch (e) {
+      console.error(e);
+      if (pInfo) pInfo.textContent = 'Load failed: ' + (e.message || e);
+    }
+    renderAllFileChips();
+  });
+}
+/* ---------- Boot & tab switch ---------- */
+async function autoReloadStoredFiles() {
+  if (typeof window.showOpenFilePicker !== 'function') return;
+  for (const [slotKey, slot] of Object.entries(STORED_SLOTS)) {
+    const { handle, perm } = await getSlotStatus(slotKey);
+    if (!handle || perm !== 'granted') continue;
+    const fn = window[slot.reloadFn];
+    if (typeof fn === 'function') {
+      try { await fn(handle); } catch (e) { console.error(`Auto-reload ${slotKey}:`, e); }
+    }
+  }
+  await renderAllFileChips();
+}
+/* =========================================================
+   MATERIAL AVAILABILITY CALCULATOR (Production Planning)
+   Multi-model · multi-variant · multi-quantity demands
+   ========================================================= */
+STATE.mrpStock = {
+  items: [],        // [{ partNo, qty }]
+  byPartNo: {},     // { partNo: totalQty }
+  loaded: false,
+  fileName: '',
+  // Staging values for the “+ Add demand” form:
+  model: '',
+  variantKey: '',   // "colorCode::bomId"  — composite key, unique per spec
+  // Demand list — each entry = independent model/variant/qty request
+  demands: []       // [{ id, model, colorCode, bomId, qty }]
+};
+
+/* ---------- Composite variant key helpers ---------- */
+function stockVariantKey(colorCode, bomId) {
+  return (colorCode || '') + '::' + (bomId || '');
+}
+function parseStockVariantKey(key) {
+  const parts = String(key || '').split('::');
+  return { colorCode: parts[0] || '', bomId: parts.slice(1).join('::') || '' };
+}
+/* Locate a specific BOM by (colorCode, bomId) inside a spec — never by bomId alone. */
+function findStockBom(spec, colorCode, bomId) {
+  if (!spec) return null;
+  const cc = colorCode || '';
+  return spec.boms.find(b =>
+    (b.bomId || '') === (bomId || '') &&
+    colorCodeOf(b.vehicleMatNo) === cc
+  ) || null;
+}
+/* ---------- File parsing ---------- */
+function parseStockFile(rows) {
+  if (!rows || !rows.length) return [];
+  const header = rows[0].map(h =>
+    String(h || '').replace(/\u00a0/g, ' ').replace(/\u200b/g, '').trim().toLowerCase()
+  );
+  const idx = (names, exclude = []) => {
+    const isEx = i => exclude.includes(i);
+    for (const n of names) {
+      const i = header.findIndex((h, j) => !isEx(j) && h === n.toLowerCase());
+      if (i >= 0) return i;
+    }
+    for (const n of names) {
+      const i = header.findIndex((h, j) => !isEx(j) && h.includes(n.toLowerCase()));
+      if (i >= 0) return i;
+    }
+    return -1;
+  };
+  const cPart = idx(['material number', 'material no', 'part number', 'part no', 'partno', 'matnr', 'material']);
+  const cQty  = idx(['quantity', 'qty', 'cantidad', 'on hand', 'stock']);
+
+  if (cPart < 0 || cQty < 0) throw new Error('Columns "Material Number" and "Quantity" are required');
+
+  const items = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || !r.length) continue;
+    const partNo = String(r[cPart] || '').trim();
+    if (!partNo) continue;
+    const raw = String(r[cQty]).replace(/[^0-9.\-]/g, '');
+    const qty = Number(raw);
+    if (!isFinite(qty) || qty === 0) continue;
+    items.push({ partNo, qty });
+  }
+  return items;
+}
+
+function buildStockIndex(items) {
+  const byPartNo = {};
+  for (const it of items) {
+    byPartNo[it.partNo] = (byPartNo[it.partNo] || 0) + it.qty;
+  }
+  return byPartNo;
+}
+
+/* ---------- File ingestion ---------- */
+async function handleStockFiles(files) {
+  const f = files[0];
+  if (!f) return;
+  try {
+    const sheets = await fileToSheetRows(f);
+    let rows;
+    if (sheets.length === 1) {
+      rows = sheets[0].rows;
+    } else {
+      const picked = await promptSheetSelection(sheets, f.name);
+      if (!picked || !picked.length) return;
+      rows = picked[0].rows;
+    }
+    const items = parseStockFile(rows);
+    if (!items.length) {
+      alert('No valid stock rows found. Each row needs a Material Number and a non-zero Quantity.');
+      return;
+    }
+
+    STATE.mrpStock.items     = items;
+    STATE.mrpStock.byPartNo  = buildStockIndex(items);
+    STATE.mrpStock.loaded    = true;
+    STATE.mrpStock.fileName  = f.name;
+
+    $('#stockFilePath').value = f.name;
+    $('#stockFileInfo').textContent =
+      `Loaded — ${items.length} part${items.length === 1 ? '' : 's'} · ` +
+      `${Object.keys(STATE.mrpStock.byPartNo).length} unique`;
+
+    populateStockModelSelect();
+    populateStockBomSelect();
+    renderStockFeasibility();
+  } catch (e) {
+    console.error(e);
+    alert('Failed to parse stock file: ' + e.message);
+  }
+}
+
+/* ---------- Model / BOM dropdowns (staging) ---------- */
+function getStockModelOptions() {
+  const bySpec = new Map();
+  for (const bom of STATE.boms) {
+    const sk = specKeyOf(bom.vehicleMatNo);
+    if (!bySpec.has(sk)) bySpec.set(sk, { specKey: sk, boms: [] });
+    bySpec.get(sk).boms.push(bom);
+  }
+  const out = [];
+  for (const [sk, g] of bySpec) {
+    g.specName = deriveSpecName(g.boms);
+    out.push({ key: sk, name: g.specName, boms: g.boms });
+  }
+  out.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  return out;
+}
+
+function populateStockModelSelect() {
+  const sel = $('#stockModel');
+  if (!sel) return;
+  const models = getStockModelOptions();
+  if (!models.length) {
+    sel.innerHTML = '<option value="">— load BOMs first —</option>';
+    STATE.mrpStock.model = '';
+    return;
+  }
+  const current = STATE.mrpStock.model || '';
+  sel.innerHTML = models.map(m =>
+    `<option value="${escapeHtml(m.key)}" ${m.key === current ? 'selected' : ''}>` +
+    `${escapeHtml(m.name)} — ${m.boms.length} variant${m.boms.length === 1 ? '' : 's'}</option>`
+  ).join('');
+  if (!current || !models.some(m => m.key === current)) {
+    STATE.mrpStock.model = models[0].key;
+    sel.value = models[0].key;
+  }
+}
+
+function populateStockBomSelect() {
+  const sel = $('#stockBom');
+  if (!sel) return;
+  const models = getStockModelOptions();
+  const spec = models.find(m => m.key === STATE.mrpStock.model);
+  if (!spec) {
+    sel.innerHTML = '<option value="">— pick a model —</option>';
+    STATE.mrpStock.variantKey = '';
+    return;
+  }
+
+  /* Deduplicate BOMs by their composite key (colorCode::bomId).
+     Two BOMs loaded from different sales batches with the same vehicleMatNo
+     and identical parts share the same bomId — they must appear once. */
+  const seenKeys = new Set();
+  const boms = [];
+  for (const b of spec.boms) {
+    const key = stockVariantKey(colorCodeOf(b.vehicleMatNo), b.bomId || '');
+    if (seenKeys.has(key)) continue;
+    seenKeys.add(key);
+    boms.push(b);
+  }
+
+  /* Sort by BOM number, then colour code — stable order in the dropdown. */
+  boms.sort((a, b) => {
+    const n = String(a.bomId || '').localeCompare(String(b.bomId || ''), undefined, { numeric: true });
+    if (n) return n;
+    return colorCodeOf(a.vehicleMatNo).localeCompare(colorCodeOf(b.vehicleMatNo));
+  });
+
+  const current = STATE.mrpStock.variantKey || '';
+
+  sel.innerHTML = boms.map(b => {
+    const cc    = colorCodeOf(b.vehicleMatNo);
+    const key   = stockVariantKey(cc, b.bomId || '');
+    const color = deriveColorName([b], spec.name) || b.vehicleDesc || b.vehicleMatNo;
+    return `<option value="${escapeHtml(key)}" ${key === current ? 'selected' : ''}>` +
+           `${escapeHtml(b.bomId || '?')} — ${escapeHtml(color)} (${b.parts.length} parts)</option>`;
+  }).join('');
+
+  if (!current || !boms.some(b =>
+        stockVariantKey(colorCodeOf(b.vehicleMatNo), b.bomId || '') === current)) {
+    const first = boms[0];
+    if (first) {
+      STATE.mrpStock.variantKey =
+        stockVariantKey(colorCodeOf(first.vehicleMatNo), first.bomId || '');
+      sel.value = STATE.mrpStock.variantKey;
+    } else {
+      STATE.mrpStock.variantKey = '';
+    }
+  }
+}
+
+/* ---------- Aggregation ---------- */
+/* Walk every demand, aggregate per-vehicle part quantities (a BOM may list the
+   same part twice), multiply by the demand qty, and sum across demands.
+   Returns:
+     required   — { partNo: totalQty }
+     usedIn     — { partNo: [{ demandId, qty }] }
+     totalVehicles */
+function aggregateDemands(demands, _byPartNo) {
+  const required  = {};
+  const usedIn    = {};
+  let totalVehicles = 0;
+
+  const models = getStockModelOptions();
+  const modelByKey = new Map(models.map(m => [m.key, m]));
+
+  for (const d of demands) {
+    const spec = modelByKey.get(d.model);
+    if (!spec) continue;
+    /* Lookup by the composite key — NOT by bomId alone. */
+    const bom = findStockBom(spec, d.colorCode, d.bomId);
+    if (!bom || !bom.parts) continue;
+
+    totalVehicles += d.qty;
+
+    const perVeh = {};
+    for (const p of bom.parts) {
+      const q = Number(p.qty) || 0;
+      if (!q) continue;
+      perVeh[p.partNo] = (perVeh[p.partNo] || 0) + q;
+    }
+    for (const [partNo, pv] of Object.entries(perVeh)) {
+      const need = pv * d.qty;
+      required[partNo] = (required[partNo] || 0) + need;
+      if (!usedIn[partNo]) usedIn[partNo] = [];
+      usedIn[partNo].push({ demandId: d.id, qty: need });
+    }
+  }
+  return { required, usedIn, totalVehicles };
+}
+
+function sanitizeDemands() {
+  const models = getStockModelOptions();
+  const modelByKey = new Map(models.map(m => [m.key, m]));
+  STATE.mrpStock.demands = (STATE.mrpStock.demands || []).filter(d => {
+    const spec = modelByKey.get(d.model);
+    if (!spec) return false;
+    /* A demand survives only if BOTH its colourCode and its bomId still exist. */
+    return !!findStockBom(spec, d.colorCode, d.bomId);
+  });
+}
+/* ---------- Demand list render ---------- */
+function renderStockDemandList() {
+  const wrap = $('#stockDemandList');
+  if (!wrap) return;
+  const demands = STATE.mrpStock.demands || [];
+  if (!demands.length) {
+    wrap.innerHTML =
+      '<div class="hint" style="margin:0">No demands yet. Pick a model, variant and quantity above, then click “+ Add demand”.</div>';
+    return;
+  }
+  const models = getStockModelOptions();
+  const modelByKey = new Map(models.map(m => [m.key, m]));
+
+  wrap.innerHTML = demands.map((d, i) => {
+    const spec = modelByKey.get(d.model);
+    const modelName = spec ? spec.name : d.model;
+    const bom = findStockBom(spec, d.colorCode, d.bomId);
+    const colorName = bom ? (deriveColorName([bom], spec.name) || bom.vehicleDesc || bom.vehicleMatNo) : '';
+    const parts = bom ? bom.parts.length : 0;
+    return `
+      <div class="mrp-demand-item" data-id="${d.id}">
+        <span class="md-idx">${i + 1}</span>
+        <span class="md-model" title="${escapeHtml(modelName)}">${escapeHtml(modelName)}</span>
+        <span class="md-bom">${escapeHtml(d.bomId || '?')}</span>
+        <span class="md-color" title="${escapeHtml(colorName)}">
+          ${d.colorCode ? `<span class="color-code" style="${colorBadgeStyle(d.colorCode)}">${escapeHtml(d.colorCode)}</span> ` : ''}
+          ${escapeHtml(colorName)}
+        </span>
+        <span class="md-qty">
+          <input type="number" min="0" step="1" value="${d.qty}"
+                 data-id="${d.id}" class="md-qty-input" />
+          <small>veh</small>
+        </span>
+        <span class="md-parts">${parts} parts</span>
+        <button class="md-del" data-id="${d.id}" title="Remove">✕</button>
+      </div>`;
+  }).join('');
+
+  wrap.querySelectorAll('.md-del').forEach(btn => {
+    btn.addEventListener('click', () => {
+      STATE.mrpStock.demands = STATE.mrpStock.demands.filter(x => x.id !== btn.dataset.id);
+      renderStockFeasibility();
+    });
+  });
+  wrap.querySelectorAll('.md-qty-input').forEach(inp => {
+    inp.addEventListener('change', () => {
+      const d = STATE.mrpStock.demands.find(x => x.id === inp.dataset.id);
+      if (!d) return;
+      d.qty = Math.max(0, Number(inp.value) || 0);
+      renderStockFeasibility();
+    });
+  });
+}
+/* ---------- Main render ---------- */
+function renderStockFeasibility() {
+  const tbl = $('#stockTable');
+  const sum = $('#stockSummary');
+  if (!tbl) return;
+
+  sanitizeDemands();
+  const demands = STATE.mrpStock.demands || [];
+  const byPartNo = STATE.mrpStock.byPartNo || {};
+
+  if (!STATE.boms.length) {
+    tbl.innerHTML = `<thead><tr><th>Load BOM files first</th></tr></thead>`;
+    if (sum) sum.innerHTML = '';
+    renderStockDemandList();
+    return;
+  }
+  if (!STATE.mrpStock.loaded) {
+    tbl.innerHTML = `<thead><tr><th>Load a stock file to begin</th></tr></thead>`;
+    if (sum) sum.innerHTML = '';
+    renderStockDemandList();
+    return;
+  }
+  if (!demands.length) {
+    tbl.innerHTML = `<thead><tr><th>Add at least one demand (model · variant · quantity)</th></tr></thead>`;
+    if (sum) {
+      sum.innerHTML = `
+        <div class="stat">
+          <div class="label">Stock file</div>
+          <div class="value">${fmt(Object.keys(byPartNo).length)}</div>
+          <div class="sub">parts on hand from <b>${escapeHtml(STATE.mrpStock.fileName || '—')}</b></div>
+        </div>
+        <div class="stat">
+          <div class="label">Demands</div>
+          <div class="value">0</div>
+          <div class="sub">pick a model above and click “+ Add demand”</div>
+        </div>`;
+    }
+    renderStockDemandList();
+    return;
+  }
+
+  const { required, usedIn, totalVehicles } = aggregateDemands(demands, byPartNo);
+
+  /* Union of required parts and stock parts, so we also see dead stock that
+     the current demands never consume (Required = 0). */
+  const allParts = new Set([...Object.keys(required), ...Object.keys(byPartNo)]);
+  const parts = [];
+  for (const partNo of allParts) {
+    const req      = required[partNo] || 0;
+    const avail    = byPartNo[partNo] || 0;
+    const leftover = avail - req;
+    const shortage = leftover < 0 ? -leftover : 0;
+    const info     = STATE.partIndex[partNo] || {};
+    parts.push({
+      partNo,
+      name:  info.nameEN || info.nameCN || '',
+      uom:   info.uom   || '',
+      available: avail,
+      required:  req,
+      leftover,
+      shortage,
+      usedIn: usedIn[partNo] || []
+    });
+  }
+
+  parts.sort((a, b) => {
+    if ((a.shortage > 0) !== (b.shortage > 0)) return a.shortage > 0 ? -1 : 1;
+    if (a.shortage !== b.shortage) return b.shortage - a.shortage;
+    if ((a.required > 0) !== (b.required > 0)) return a.required > 0 ? -1 : 1;
+    return a.partNo.localeCompare(b.partNo, undefined, { numeric: true });
+  });
+
+  const shortages       = parts.filter(p => p.shortage > 0);
+  const totalShort      = shortages.reduce((s, p) => s + p.shortage, 0);
+  const partsWithDemand = parts.filter(p => p.required > 0).length;
+
+  if (sum) {
+    sum.innerHTML = `
+      <div class="stat">
+        <div class="label">Demands</div>
+        <div class="value">${fmt(demands.length)}</div>
+        <div class="sub"><b>${fmt(totalVehicles)}</b> vehicles in total</div>
+      </div>
+      <div class="stat">
+        <div class="label">Distinct materials required</div>
+        <div class="value">${fmt(partsWithDemand)}</div>
+        <div class="sub">across all demands</div>
+      </div>
+      <div class="stat">
+        <div class="label">Parts short</div>
+        <div class="value" style="color:${shortages.length ? 'var(--danger)' : 'var(--ok)'}">
+          ${fmt(shortages.length)}
+        </div>
+        <div class="sub">${totalShort
+          ? `<b>${fmt(totalShort)}</b> units short in total`
+          : 'no shortage'}</div>
+      </div>
+      <div class="stat">
+        <div class="label">Stock file</div>
+        <div class="value">${fmt(Object.keys(byPartNo).length)}</div>
+        <div class="sub">parts on hand from <b>${escapeHtml(STATE.mrpStock.fileName || '—')}</b></div>
+      </div>`;
+  }
+
+  const head = `
+    <thead><tr>
+      <th>Material Number</th>
+      <th>Description</th>
+      <th>UOM</th>
+      <th class="num">On Hand</th>
+      <th class="num">Required</th>
+      <th class="num">Leftover</th>
+      <th class="num">Shortage</th>
+      <th class="num">Used In</th>
+    </tr></thead>`;
+
+  const body = parts.map(p => {
+    const shortCell = p.shortage > 0
+      ? `<span style="color:var(--danger);font-weight:600">−${fmt(p.shortage)}</span>`
+      : '—';
+    const usedInCell = p.usedIn.length
+      ? `<button class="btn tiny" data-role="used-in" data-partno="${escapeHtml(p.partNo)}">
+           ${p.usedIn.length} demand${p.usedIn.length === 1 ? '' : 's'}
+         </button>`
+      : '—';
+    return `
+      <tr class="${p.shortage > 0 ? 'stock-short-row' : ''}">
+        <td class="mono">${escapeHtml(p.partNo)}</td>
+        <td>${escapeHtml(p.name)}</td>
+        <td>${escapeHtml(p.uom)}</td>
+        <td class="num">${fmt(p.available)}</td>
+        <td class="num">${fmt(p.required)}</td>
+        <td class="num" style="color:${p.leftover < 0 ? 'var(--danger)' : 'inherit'};font-weight:${p.leftover < 0 ? '600' : '400'}">
+          ${fmt(p.leftover)}
+        </td>
+        <td class="num">${shortCell}</td>
+        <td class="num">${usedInCell}</td>
+      </tr>`;
+  }).join('');
+
+  tbl.innerHTML = head + `<tbody>${body ||
+    '<tr><td colspan="8" style="text-align:center;color:#6b7280;padding:16px">No materials to compute</td></tr>'}</tbody>`;
+
+  /* “Used In” breakdown */
+   tbl.querySelectorAll('button[data-role=used-in]').forEach(btn => {
+     btn.addEventListener('click', () => {
+       const partNo = btn.dataset.partno;
+       const p = parts.find(x => x.partNo === partNo);
+       if (!p) return;
+       const models = getStockModelOptions();
+       const modelByKey = new Map(models.map(m => [m.key, m]));
+       const lines = p.usedIn.map(u => {
+         const d = demands.find(x => x.id === u.demandId);
+         if (!d) return '';
+         const spec = modelByKey.get(d.model);
+         const label = spec ? spec.name : d.model;
+         const bom = findStockBom(spec, d.colorCode, d.bomId);
+         const color = bom ? (deriveColorName([bom], spec.name) || bom.vehicleDesc || '') : '';
+         const ccLabel = d.colorCode ? `[${d.colorCode}] ` : '';
+         const unit  = p.uom ? ' ' + p.uom : '';
+         return `• ${label} · ${d.bomId} · ${ccLabel}${color} — ${fmt(d.qty)} veh → ${fmt(u.qty)}${unit}`;
+       }).filter(Boolean).join('\n');
+       alert(`Used In — ${partNo}\n\n${lines}\n\nTotal required: ${fmt(p.required)}${p.uom ? ' ' + p.uom : ''}`);
+     });
+   });
+
+  renderStockDemandList();
+}
+
+/* ---------- Export ---------- */
+function exportStockCalc() {
+  const demands = STATE.mrpStock.demands || [];
+  if (!demands.length)        { alert('Add at least one demand first.'); return; }
+  if (!STATE.mrpStock.loaded) { alert('Load a stock file first.');     return; }
+
+  const byPartNo = STATE.mrpStock.byPartNo;
+  const { required, totalVehicles } = aggregateDemands(demands, byPartNo);
+  const models = getStockModelOptions();
+  const modelByKey = new Map(models.map(m => [m.key, m]));
+
+  const aoa = [
+    ['Material availability — aggregated demand vs stock'],
+    ['Stock file', STATE.mrpStock.fileName || ''],
+    ['Total demands', demands.length],
+    ['Total vehicles', totalVehicles],
+    [],
+    ['#', 'Model', 'BOM variant', 'Colour code', 'Colour', 'Quantity (vehicles)']
+  ];
+  demands.forEach((d, i) => {
+    const spec = modelByKey.get(d.model);
+    const modelName = spec ? spec.name : d.model;
+    const bom = findStockBom(spec, d.colorCode, d.bomId);
+    const colorName = bom ? (deriveColorName([bom], spec.name) || bom.vehicleDesc || bom.vehicleMatNo) : '';
+    aoa.push([i + 1, modelName, d.bomId, d.colorCode || '', colorName, d.qty]);
+  });
+  aoa.push([]);
+  aoa.push(['Material Number', 'Description', 'UOM', 'On Hand', 'Required', 'Leftover', 'Shortage']);
+
+  const allParts = new Set([...Object.keys(required), ...Object.keys(byPartNo)]);
+  const rows = [];
+  for (const partNo of allParts) {
+    const req      = required[partNo] || 0;
+    const avail    = byPartNo[partNo] || 0;
+    const leftover = avail - req;
+    const shortage = leftover < 0 ? -leftover : 0;
+    const info     = STATE.partIndex[partNo] || {};
+    rows.push({
+      partNo,
+      name:  info.nameEN || info.nameCN || '',
+      uom:   info.uom || '',
+      avail, req, leftover, shortage
+    });
+  }
+  rows.sort((a, b) => {
+    if (a.shortage !== b.shortage) return b.shortage - a.shortage;
+    return a.partNo.localeCompare(b.partNo, undefined, { numeric: true });
+  });
+  for (const r of rows) {
+    aoa.push([
+      r.partNo, r.name, r.uom,
+      round3(r.avail), round3(r.req), round3(r.leftover), round3(r.shortage)
+    ]);
+  }
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Demand vs Stock');
+  downloadWorkbook(wb, `Stock_Demand_${dateStamp()}.xlsx`);
+}
+/* ---------- Bindings ---------- */
+function bindStockCalc() {
+  /* Native FSA picker, with fallback to <input type=file> */
+  $('#stockFilePick')?.addEventListener('click', async () => {
+    if (typeof window.showOpenFilePicker !== 'function') { $('#stockInput').click(); return; }
+    try {
+      const [handle] = await window.showOpenFilePicker({
+        types: [{
+          description: 'Stock list',
+          accept: {
+            'text/csv': ['.csv', '.tsv'],
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+            'application/vnd.ms-excel': ['.xls']
+          }
+        }]
+      });
+      const f = await handle.getFile();
+      await handleStockFiles([f]);
+    } catch (e) {
+      if (e.name !== 'AbortError') { console.error(e); alert('Failed to open file: ' + e.message); }
+    }
+  });
+
+  $('#stockInput')?.addEventListener('change', e => {
+    const f = e.target.files?.[0];
+    if (f) handleStockFiles([f]);
+    e.target.value = '';
+  });
+
+  const dz = $('#stockDrop');
+  if (dz) {
+    ['dragenter','dragover'].forEach(ev => dz.addEventListener(ev, e => {
+      e.preventDefault(); dz.classList.add('drag');
+    }));
+    ['dragleave','drop'].forEach(ev => dz.addEventListener(ev, e => {
+      e.preventDefault(); dz.classList.remove('drag');
+    }));
+    dz.addEventListener('drop', e => {
+      const f = e.dataTransfer.files?.[0];
+      if (f) handleStockFiles([f]);
+    });
+  }
+
+   $('#stockFileClear')?.addEventListener('click', () => {
+     STATE.mrpStock.items      = [];
+     STATE.mrpStock.byPartNo   = {};
+     STATE.mrpStock.loaded     = false;
+     STATE.mrpStock.fileName   = '';
+     /* Demands survive — user may re-upload a new stock file for the same demands. */
+     const p = $('#stockFilePath'); if (p) p.value = '';
+     const i = $('#stockFileInfo'); if (i) i.textContent = 'No stock file loaded.';
+     renderStockFeasibility();
+   });
+
+   $('#stockModel')?.addEventListener('change', e => {
+  STATE.mrpStock.model = e.target.value || '';
+  STATE.mrpStock.variantKey = '';    // model changed → drop the staged variant
+  populateStockBomSelect();
+});
+
+$('#stockBom')?.addEventListener('change', e => {
+  STATE.mrpStock.variantKey = e.target.value || '';
+});
+
+$('#stockAddDemand')?.addEventListener('click', () => {
+  const model      = STATE.mrpStock.model;
+  const variantKey = STATE.mrpStock.variantKey || '';
+  const { colorCode, bomId } = parseStockVariantKey(variantKey);
+
+  const qtyIn = $('#stockQty');
+  const qty   = Number(qtyIn?.value);
+
+  if (!model)                 { alert('Pick a model.');                 return; }
+  if (!bomId)                 { alert('Pick a BOM variant.');           return; }
+  if (!qty || qty <= 0)       { alert('Enter a positive quantity.');    return; }
+
+  STATE.mrpStock.demands.push({
+    id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()),
+    model, colorCode, bomId, qty
+  });
+  if (qtyIn) qtyIn.value = '';
+  renderStockFeasibility();
+});
+   
+  $('#stockDemandClear')?.addEventListener('click', () => {
+    if (!STATE.mrpStock.demands.length) return;
+    if (!confirm('Remove all demands?')) return;
+    STATE.mrpStock.demands = [];
+    renderStockFeasibility();
+  });
+
+  $('#stockExport')?.addEventListener('click', exportStockCalc);
+}
+/* =========================================================
+   DIAGNOSTICS: Compare BOMs
+   ========================================================= */
+function openCompareBomModal(specKey, specName) {
+  const boms = STATE.boms.filter(b => specKeyOf(b.vehicleMatNo) === specKey);
+  const uniqueBoms = Array.from(new Set(boms.map(b => b.bomId))).sort();
+
+  if (uniqueBoms.length < 2) return;
+
+  let modal = document.getElementById('compareBomModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'compareBomModal';
+    modal.className = 'modal-overlay hidden';
+    modal.innerHTML = `
+      <div class="modal-box" style="width:min(900px,100%)">
+        <div class="modal-header">
+          <div>
+            <h3>Compare BOMs — ${escapeHtml(specName)}</h3>
+            <div class="bdm-subtitle">Select two BOMs to see exactly what differs between them.</div>
+          </div>
+          <button class="modal-close" onclick="document.getElementById('compareBomModal').classList.add('hidden');document.body.style.overflow='';">✕</button>
+        </div>
+        <div class="modal-body" style="padding:16px 20px; overflow-y:auto; max-height:80vh;">
+          <div style="display:flex; gap:16px; margin-bottom:16px; align-items:center;">
+            <label>BOM A: <select id="compareBomA" class="prod-period-select">${uniqueBoms.map(b => `<option value="${b}">${b}</option>`).join('')}</select></label>
+            <span>vs</span>
+            <label>BOM B: <select id="compareBomB" class="prod-period-select">${uniqueBoms.map((b, i) => `<option value="${b}" ${i===1?'selected':''}>${b}</option>`).join('')}</select></label>
+          </div>
+          <div id="compareBomResults" class="table-wrap" style="border:none;"></div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    
+    document.getElementById('compareBomA').addEventListener('change', () => runBomDiff(specKey));
+    document.getElementById('compareBomB').addEventListener('change', () => runBomDiff(specKey));
+  }
+
+  modal.querySelector('h3').textContent = `Compare BOMs — ${specName}`;
+  modal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  
+  setTimeout(() => runBomDiff(specKey), 10);
+}
+
+/* =========================================================
+   DIAGNOSTICS: Compare BOMs & Export
+   ========================================================= */
+let _lastBomDiffRows = [];
+let _lastBomDiffIds = { idA: '', idB: '' };
+
+function openCompareBomModal(specKey, specName) {
+  const boms = STATE.boms.filter(b => specKeyOf(b.vehicleMatNo) === specKey);
+  const uniqueBoms = Array.from(new Set(boms.map(b => b.bomId))).sort();
+
+  if (uniqueBoms.length < 2) return;
+
+  let modal = document.getElementById('compareBomModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'compareBomModal';
+    modal.className = 'modal-overlay hidden';
+    modal.innerHTML = `
+      <div class="modal-box" style="width:min(900px,100%)">
+        <div class="modal-header">
+          <div>
+            <h3>Compare BOMs — ${escapeHtml(specName)}</h3>
+            <div class="bdm-subtitle">Select two BOMs to see exactly what differs between them.</div>
+          </div>
+          <button class="modal-close" onclick="document.getElementById('compareBomModal').classList.add('hidden');document.body.style.overflow='';">✕</button>
+        </div>
+        <div class="modal-body" style="padding:16px 20px; overflow-y:auto; max-height:80vh;">
+          <div style="display:flex; gap:16px; margin-bottom:16px; align-items:center;">
+            <label>BOM A: <select id="compareBomA" class="prod-period-select">${uniqueBoms.map(b => `<option value="${b}">${b}</option>`).join('')}</select></label>
+            <span>vs</span>
+            <label>BOM B: <select id="compareBomB" class="prod-period-select">${uniqueBoms.map((b, i) => `<option value="${b}" ${i===1?'selected':''}>${b}</option>`).join('')}</select></label>
+            <button class="btn primary" id="exportCompareBomBtn" style="margin-left:auto;">⤓ Export to Excel</button>
+          </div>
+          <div id="compareBomResults" class="table-wrap" style="border:none;"></div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    
+    document.getElementById('compareBomA').addEventListener('change', () => runBomDiff(specKey));
+    document.getElementById('compareBomB').addEventListener('change', () => runBomDiff(specKey));
+    document.getElementById('exportCompareBomBtn').addEventListener('click', exportBomDiff);
+  }
+
+  modal.querySelector('h3').textContent = `Compare BOMs — ${specName}`;
+  modal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+  
+  setTimeout(() => runBomDiff(specKey), 10);
+}
+
+function runBomDiff(specKey) {
+  const idA = document.getElementById('compareBomA').value;
+  const idB = document.getElementById('compareBomB').value;
+  const res = document.getElementById('compareBomResults');
+
+  if (idA === idB) {
+    res.innerHTML = '<div class="hint">Please select two different BOMs.</div>';
+    _lastBomDiffRows = [];
+    return;
+  }
+
+  const boms = STATE.boms.filter(b => specKeyOf(b.vehicleMatNo) === specKey);
+  const bomA = boms.find(b => b.bomId === idA);
+  const bomB = boms.find(b => b.bomId === idB);
+
+  if (!bomA || !bomB) return;
+
+  const getPartsMap = (bom) => {
+    const map = new Map();
+    for (const p of bom.parts) {
+      const raw = String(p.partNo || '').trim();
+      const ext = colorCodeOf(bom.vehicleMatNo);
+      const nrm = (isColourPartNo(raw) && suffixOfColourPart(raw) === ext) ? prefixOfColourPart(raw) + 'XX' : raw;
+      
+      const uom = (p.uom || '').trim();
+      const key = `${nrm}||${uom}`;
+      
+      if (!map.has(key)) {
+        map.set(key, { pn: nrm, uom: uom, qty: 0, desc: p.nameEN || p.nameCN, mwos: new Set() });
+      }
+      
+      const entry = map.get(key);
+      entry.qty += (Number(p.qty) || 0);
+      
+      if (p.mwo && String(p.mwo).trim()) {
+        entry.mwos.add(String(p.mwo).trim());
+      }
+    }
+
+    for (const entry of map.values()) {
+      entry.mwoStr = Array.from(entry.mwos).sort().join(', ') || '—';
+    }
+    return map;
+  };
+
+  const mapA = getPartsMap(bomA);
+  const mapB = getPartsMap(bomB);
+
+  const allKeys = new Set([...mapA.keys(), ...mapB.keys()]);
+  const diffs = [];
+
+  for (const key of allKeys) {
+    const a = mapA.get(key);
+    const b = mapB.get(key);
+    
+    if (a && !b) {
+      diffs.push({ status: 'missing_b', pn: a.pn, uom: a.uom, qtyA: a.qty, qtyB: 0, desc: a.desc, mwoA: a.mwoStr, mwoB: '—', mwoDiff: false });
+    } else if (b && !a) {
+      diffs.push({ status: 'missing_a', pn: b.pn, uom: b.uom, qtyA: 0, qtyB: b.qty, desc: b.desc, mwoA: '—', mwoB: b.mwoStr, mwoDiff: false });
+    } else if (a.qty !== b.qty) {
+      diffs.push({ status: 'qty_diff', pn: a.pn, uom: a.uom, qtyA: a.qty, qtyB: b.qty, desc: a.desc || b.desc, mwoA: a.mwoStr, mwoB: b.mwoStr, mwoDiff: a.mwoStr !== b.mwoStr });
+    } else if (a.mwoStr !== b.mwoStr) {
+      diffs.push({ status: 'mwo_diff', pn: a.pn, uom: a.uom, qtyA: a.qty, qtyB: b.qty, desc: a.desc || b.desc, mwoA: a.mwoStr, mwoB: b.mwoStr, mwoDiff: true });
+    }
+  }
+
+  _lastBomDiffRows = diffs;
+  _lastBomDiffIds = { idA, idB };
+
+  if (!diffs.length) {
+    res.innerHTML = '<div class="hint" style="color:var(--ok)">✅ No differences found after aggregation. If they are still separate BOMs, check for hidden formatting issues.</div>';
+    return;
+  }
+
+  const html = `
+    <table class="compact" style="width:100%">
+      <thead><tr>
+        <th>Diff</th>
+        <th>Normalised Part</th>
+        <th>Description</th>
+        <th class="num">Qty (${idA})</th>
+        <th class="num">Qty (${idB})</th>
+        <th>MWO (${idA})</th>
+        <th>MWO (${idB})</th>
+      </tr></thead>
+      <tbody>
+        ${diffs.map(d => `
+          <tr>
+            <td style="color:${d.status === 'qty_diff' || d.status === 'mwo_diff' ? 'var(--warn)' : 'var(--danger)'}; font-weight:600;">
+              ${d.status === 'missing_a' ? 'Only in ' + idB : d.status === 'missing_b' ? 'Only in ' + idA : d.status === 'qty_diff' ? 'Qty Mismatch' : 'MWO Mismatch'}
+            </td>
+            <td class="mono">${escapeHtml(d.pn)}</td>
+            <td>${escapeHtml(d.desc || '')}</td>
+            <td class="num ${d.status === 'missing_a' ? 'empty-cell' : ''}">${fmt(d.qtyA)} <span style="font-size:10px;color:#999">${escapeHtml(d.uom)}</span></td>
+            <td class="num ${d.status === 'missing_b' ? 'empty-cell' : ''}">${fmt(d.qtyB)} <span style="font-size:10px;color:#999">${escapeHtml(d.uom)}</span></td>
+            <td class="mono" style="${d.mwoDiff ? 'color:var(--danger);font-weight:600;' : ''}">${escapeHtml(d.mwoA)}</td>
+            <td class="mono" style="${d.mwoDiff ? 'color:var(--danger);font-weight:600;' : ''}">${escapeHtml(d.mwoB)}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    </table>
+  `;
+  
+  res.innerHTML = `<div class="hint" style="margin:0 0 8px">Found <b>${diffs.length}</b> difference${diffs.length===1?'':'s'} between ${idA} and ${idB}:</div>` + html;
+}
+
+function exportBomDiff() {
+  if (!_lastBomDiffRows || !_lastBomDiffRows.length) {
+    alert('No differences to export.');
+    return;
+  }
+
+  const { idA, idB } = _lastBomDiffIds;
+  const aoa = [
+    ['Diff', 'Normalised Part', 'Description', `Qty (${idA})`, 'UoM', `Qty (${idB})`, `MWO (${idA})`, `MWO (${idB})`]
+  ];
+
+  _lastBomDiffRows.forEach(d => {
+    let diffLabel = '';
+    if (d.status === 'missing_b') diffLabel = `Only in ${idA}`;
+    else if (d.status === 'missing_a') diffLabel = `Only in ${idB}`;
+    else if (d.status === 'qty_diff') diffLabel = 'Qty Mismatch';
+    else if (d.status === 'mwo_diff') diffLabel = 'MWO Mismatch';
+
+    aoa.push([
+      diffLabel,
+      d.pn,
+      d.desc || '',
+      d.qtyA,
+      d.uom,
+      d.qtyB,
+      d.mwoA,
+      d.mwoB
+    ]);
+  });
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'BOM Diff');
+  downloadWorkbook(wb, `BOM_Compare_${dateStamp()}.xlsx`);
+}
+
+/* Wire up the compare buttons */
+document.addEventListener('click', e => {
+  const btn = e.target.closest('button[data-role=compare-boms]');
+  if (btn) {
+    e.preventDefault();
+    e.stopPropagation();
+    openCompareBomModal(btn.dataset.speckey, btn.dataset.specname);
+  }
+});
+/* ---------------------------------------------------------
+   Restore-session banner
+   When Chrome/Edge blocks auto-reload of FSA handles on a fresh
+   session, we show a small card the user can click once to grant
+   permissions for every pending slot and reload them.
+   --------------------------------------------------------- */
+async function showRestoreSessionBanner() {
+  if (document.getElementById('restoreBanner')) return;
+
+  /* Collect slots stuck on 'prompt' or 'denied'. */
+  const pending = [];
+  for (const [slotKey, slot] of Object.entries(STORED_SLOTS)) {
+    const { handle, perm } = await getSlotStatus(slotKey);
+    if (handle && perm !== 'granted' && perm !== 'absent') {
+      pending.push({ slotKey, slot, perm });
+    }
+  }
+  if (!pending.length) return;
+
+  const banner = document.createElement('div');
+  banner.id = 'restoreBanner';
+  banner.style.cssText = `
+    position: fixed; top: 72px; right: 20px; z-index: 250;
+    background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px;
+    padding: 14px 18px; box-shadow: 0 8px 24px rgba(16,24,40,.14);
+    max-width: 380px; font-size: 13px; line-height: 1.5;`;
+  banner.innerHTML = `
+    <div style="font-weight:600;color:#92400e;margin-bottom:6px">
+      ⚠ Stored files need reconnection
+    </div>
+    <div style="color:#78350f;margin-bottom:10px">
+      The browser blocked automatic reload of ${pending.length}
+      stored file${pending.length === 1 ? '' : 's'}.
+      Click below to reconnect and reload them in one go.
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button id="restoreDismiss" style="
+        padding:5px 10px;border:1px solid #e5e7eb;background:#fff;
+        border-radius:6px;cursor:pointer;font-size:12px">Dismiss</button>
+      <button id="restoreAll" style="
+        padding:5px 12px;border:1px solid #f59e0b;background:#f59e0b;
+        color:#fff;border-radius:6px;cursor:pointer;font-size:12px;font-weight:600">
+        🔓 Reconnect &amp; Reload</button>
+    </div>`;
+  document.body.appendChild(banner);
+
+  document.getElementById('restoreDismiss').addEventListener('click', () => banner.remove());
+  document.getElementById('restoreAll').addEventListener('click', async () => {
+    banner.remove();
+    for (const [slotKey, slot] of Object.entries(STORED_SLOTS)) {
+      const { handle, perm } = await getSlotStatus(slotKey);
+      if (!handle || perm === 'granted') continue;
+      /* We are inside a click handler, so requestPermission is allowed. */
+      let p = await handle.queryPermission({ mode: slot.mode });
+      if (p !== 'granted') p = await handle.requestPermission({ mode: slot.mode });
+      if (p !== 'granted') continue;
+      const fn = window[slot.reloadFn];
+      if (typeof fn === 'function') {
+        try { await fn(handle); } catch (e) { console.error('Restore ' + slotKey, e); }
+      }
+    }
+    await renderAllFileChips();
+    await renderStoredFilesTab();
+  });
+}
+/* =========================================================
+   MATERIAL READINESS MODULE (Shipment vs Vehicle Allocation)
+   ========================================================= */
+const LS_WH_MAPPING = 'mrp.providerWhMappings.v1';
+let _mrFolderFiles = [];
+
+STATE.materialReadiness = {
+  packingList: [], // { shipmentBatch, containerId, partNo, totalQty, provider, warehouseId, allocatedQty }
+  allocations: [], // { id, vehicleBatch, shipmentBatch, containerId, partNo, qty, date }
+  pendingUpload: [], // Temporarily holds parsed data before warehouse confirmation
+  selectedVehicleBatch: ''
+};
+
+function initMaterialReadiness() {
+  /* 1. Inject Tab Button (Right after Material List) */
+  const tabs = document.querySelector('.tabs');
+  const tabBtn = document.createElement('button');
+  tabBtn.className = 'tab';
+  tabBtn.dataset.tab = 'readiness';
+  tabBtn.textContent = 'Material Readiness';
+  
+  const materialTab = document.querySelector('.tab[data-tab="bom"]');
+  if (materialTab) {
+    materialTab.insertAdjacentElement('afterend', tabBtn);
+  } else {
+    tabs.insertBefore(tabBtn, tabs.lastElementChild); // Fallback
+  }
+
+  /* 2. Inject Panel HTML */
+  const main = document.querySelector('main');
+  const panel = document.createElement('section');
+  panel.className = 'tab-panel';
+  panel.id = 'panel-readiness';
+  panel.innerHTML = `
+    <div class="card">
+      <h2>1. Shipment Packing Lists</h2>
+      <p class="hint">Select a folder containing packing list files. Subfolders are scanned recursively for <code>.xlsx</code>, <code>.xls</code>, and <code>.csv</code>. You will be prompted to assign a warehouse to the shipments.</p>
+      
+      <div class="folder-loader">
+        <div class="folder-path-row">
+          <input id="mrFolderPath" type="text" readonly placeholder="No folder selected…" />
+          <button class="btn" id="mrFolderPick">📁 Choose folder</button>
+          <button class="btn primary" id="mrFolderProcess" disabled>▶ Process files</button>
+        </div>
+        <div class="folder-hint" id="mrFolderInfo">No folder selected yet.</div>
+        
+        <!-- hidden fallback picker -->
+        <input type="file" id="mrFolderFallback" webkitdirectory directory multiple hidden />
+      </div>
+
+      <div id="mrPendingWrap" class="hidden" style="margin-top:16px; border-top:1px dashed #e2e8f0; padding-top:16px;">
+        <h3 style="font-size:14px; margin-bottom:10px;">Assign Warehouses</h3>
+        <div id="mrPendingList" style="max-height:400px; overflow-y:auto; padding-right:8px;"></div>
+        <div class="row-2" style="margin-top:12px;">
+          <button class="btn primary" id="mrConfirmUpload">✓ Confirm & Load</button>
+          <button class="btn ghost" id="mrCancelUpload">✕ Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>2. Build Readiness</h2>
+      <div class="toolbar">
+        <select id="mrVehicleSelect" style="flex:1; max-width:300px;">
+          <option value="">— select vehicle batch —</option>
+        </select>
+        <button class="btn primary" id="mrCheckBtn">Check Readiness</button>
+        <button class="btn ghost" id="mrAutoCheckBtn">Auto-Link All</button>
+      </div>
+      <div class="stats" id="mrStats" style="margin-bottom:14px;"></div>
+      <div class="table-wrap" style="max-height:500px;">
+        <table id="mrTable"></table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>3. Allocation Ledger (Traceability)</h2>
+      <div class="toolbar">
+        <input id="mrLedgerSearch" type="search" placeholder="Search by Vehicle Batch, Shipment Batch, or Part No..." />
+        <button class="btn" id="mrLedgerExport">⤓ Export Ledger</button>
+      </div>
+      <div class="table-wrap" style="max-height:500px;">
+        <table id="mrLedgerTable"></table>
+      </div>
+    </div>
+  `;
+  main.appendChild(panel);
+
+  /* 3. Bind Events */
+  bindTabs(); // Re-bind tabs to include the new one
+  
+  document.getElementById('mrFolderPick').addEventListener('click', pickMrFolder);
+  document.getElementById('mrFolderProcess').addEventListener('click', processMrFolder);
+  document.getElementById('mrFolderFallback').addEventListener('change', handleMrFolderFallback);
+  
+  document.getElementById('mrConfirmUpload').addEventListener('click', confirmMrUpload);
+  document.getElementById('mrCancelUpload').addEventListener('click', () => {
+    STATE.materialReadiness.pendingUpload = [];
+    _mrFolderFiles = [];
+    document.getElementById('mrFolderPath').value = '';
+    document.getElementById('mrFolderInfo').textContent = 'No folder selected yet.';
+    document.getElementById('mrFolderProcess').disabled = true;
+    document.getElementById('mrPendingWrap').classList.add('hidden');
+  });
+
+  document.getElementById('mrCheckBtn').addEventListener('click', renderMrReadiness);
+  document.getElementById('mrAutoCheckBtn').addEventListener('click', autoLinkReadiness);
+  
+  document.getElementById('mrLedgerSearch').addEventListener('input', renderMrLedger);
+  document.getElementById('mrLedgerExport').addEventListener('click', exportMrLedger);
+
+  populateMrVehicleSelect();
+  renderMrLedger();
+}
+
+/* =========================================================
+   FOLDER PICKING & PARSING
+   ========================================================= */
+async function pickMrFolder() {
+  if (typeof window.showDirectoryPicker === 'function') {
+    try {
+      const handle = await window.showDirectoryPicker({ mode: 'read' });
+      _mrFolderFiles = [];
+      document.getElementById('mrFolderPath').value = '/' + handle.name + '/';
+      document.getElementById('mrFolderInfo').textContent = 'Scanning folder…';
+      document.getElementById('mrFolderProcess').disabled = true;
+      
+      await walkMrDirectory(handle, '');
+      
+      const n = _mrFolderFiles.length;
+      document.getElementById('mrFolderInfo').textContent = n 
+        ? `${n} packing list file${n===1?'':'s'} found — click “Process files”.`
+        : 'No valid files found.';
+      document.getElementById('mrFolderProcess').disabled = n === 0;
+      return;
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      console.warn('showDirectoryPicker failed, falling back', e);
+    }
+  }
+  document.getElementById('mrFolderFallback').click();
+}
+
+async function walkMrDirectory(dirHandle, prefix) {
+  for await (const entry of dirHandle.values()) {
+    if (entry.kind === 'file') {
+      if (!/\.(xlsx|xls|csv)$/i.test(entry.name)) continue;
+      const file = await entry.getFile();
+      _mrFolderFiles.push({ file, path: prefix + entry.name });
+    } else if (entry.kind === 'directory') {
+      if (entry.name.startsWith('.') || entry.name.startsWith('~')) continue;
+      await walkMrDirectory(entry, prefix + entry.name + '/');
+    }
+  }
+}
+
+function handleMrFolderFallback(e) {
+  const files = Array.from(e.target.files || []);
+  _mrFolderFiles = files
+    .filter(f => /\.(xlsx|xls|csv)$/i.test(f.name))
+    .map(f => ({ file: f, path: f.webkitRelativePath || f.name }));
+  
+  if (_mrFolderFiles.length) {
+    const first = _mrFolderFiles[0].path;
+    const root  = first.split('/')[0];
+    document.getElementById('mrFolderPath').value = '/' + root + '/';
+    document.getElementById('mrFolderInfo').textContent = `${_mrFolderFiles.length} files found — click “Process files”.`;
+    document.getElementById('mrFolderProcess').disabled = false;
+  } else {
+    document.getElementById('mrFolderPath').value = '';
+    document.getElementById('mrFolderInfo').textContent = 'No valid files found.';
+    document.getElementById('mrFolderProcess').disabled = true;
+  }
+  e.target.value = '';
+}
+
+function parseMrRows(rows) {
+  if (!rows || !rows.length) return [];
+  
+  const header = rows[0].map(h => String(h || '').replace(/\u00a0/g, ' ').trim().toLowerCase());
+  const findCol = (hints) => {
+    for (const h of hints) {
+      const i = header.findIndex(x => x === h || x.includes(h));
+      if (i >= 0) return i;
+    }
+    return -1;
+  };
+
+  const cBatch = findCol(['shipment batch', 'batch id', 'batch']);
+  const cCont  = findCol(['container', 'container id']);
+  const cPart  = findCol(['material code', 'part no', 'material number']);
+  const cQty   = findCol(['quantity', 'qty']);
+  const cProv  = findCol(['provider', 'supplier', 'vendor']);
+
+  if (cBatch < 0 || cCont < 0 || cPart < 0 || cQty < 0 || cProv < 0) {
+    console.warn('Missing required columns in file. Skipping.');
+    return [];
+  }
+
+  const out = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || !r.length) continue;
+    const partNo = String(r[cPart] || '').trim();
+    if (!partNo) continue;
+    
+    out.push({
+      shipmentBatch: String(r[cBatch] || '').trim(),
+      containerId:   String(r[cCont] || '').trim(),
+      partNo:        partNo,
+      totalQty:      Number(String(r[cQty]).replace(/[^0-9.]/g, '')) || 0,
+      provider:      String(r[cProv] || '').trim(),
+      warehouseId:   '',
+      allocatedQty:  0
+    });
+  }
+  return out;
+}
+
+async function processMrFolder() {
+  if (!_mrFolderFiles.length) return;
+  
+  const btn = document.getElementById('mrFolderProcess');
+  const info = document.getElementById('mrFolderInfo');
+  btn.disabled = true;
+  
+  let allItems = [];
+  let ok = 0, fail = 0;
+  
+  for (let i = 0; i < _mrFolderFiles.length; i++) {
+    const f = _mrFolderFiles[i];
+    info.textContent = `Processing ${i+1} / ${_mrFolderFiles.length} — ${f.path}`;
+    await yieldToUI();
+    
+    try {
+      const rows = await fileToRows(f.file);
+      const parsed = parseMrRows(rows);
+      if (parsed.length) {
+        allItems.push(...parsed);
+        ok++;
+      }
+    } catch (err) {
+      console.error(err);
+      fail++;
+    }
+  }
+  
+  if (allItems.length) {
+    STATE.materialReadiness.pendingUpload = allItems;
+    renderMrPendingAssignments();
+    info.textContent = `Loaded ${allItems.length} items from ${ok} file(s). ${fail} failed.`;
+  } else {
+    alert('No valid packing list items found in the selected folder.');
+    info.textContent = 'Processing complete. No valid data found.';
+    btn.disabled = false;
+  }
+}
+
+/* =========================================================
+   WAREHOUSE ASSIGNMENT
+   ========================================================= */
+function renderMrPendingAssignments() {
+  const wrap = document.getElementById('mrPendingWrap');
+  const list = document.getElementById('mrPendingList');
+  const pending = STATE.materialReadiness.pendingUpload;
+
+  // Group by ShipmentBatch + Provider
+  const groups = new Map();
+  for (const p of pending) {
+    const key = p.shipmentBatch + '||' + p.provider;
+    if (!groups.has(key)) groups.set(key, { shipmentBatch: p.shipmentBatch, provider: p.provider, count: 0 });
+    groups.get(key).count++;
+  }
+
+  // Load past mappings from local storage
+  let pastMappings = {};
+  try { pastMappings = JSON.parse(localStorage.getItem(LS_WH_MAPPING) || '{}'); } catch(e){}
+
+  const activeWhs = STATE.config.warehouses.filter(w => w.enabled);
+
+  list.innerHTML = Array.from(groups.values()).map(g => {
+    const savedWh = pastMappings[g.provider] || STATE.config.defaultWarehouseId || '';
+    return `
+      <div class="mr-wh-row">
+        <div>
+          <b class="mono">${escapeHtml(g.shipmentBatch)}</b> (${g.count} items) <br>
+          <small style="color:var(--muted)">Provider: ${escapeHtml(g.provider)}</small>
+        </div>
+        <select data-batch="${escapeHtml(g.shipmentBatch)}" data-provider="${escapeHtml(g.provider)}" class="mr-wh-select">
+          <option value="">— select warehouse —</option>
+          ${activeWhs.map(w => `<option value="${w.id}" ${w.id === savedWh ? 'selected' : ''}>${escapeHtml(w.name)}</option>`).join('')}
+        </select>
+      </div>
+    `;
+  }).join('');
+
+  wrap.classList.remove('hidden');
+  document.getElementById('mrFolderProcess').disabled = false;
+}
+
+function confirmMrUpload() {
+  const selects = document.querySelectorAll('.mr-wh-select');
+  const assignments = new Map();
+  let valid = true;
+
+  selects.forEach(sel => {
+    if (!sel.value) { valid = false; sel.style.borderColor = 'var(--danger)'; }
+    else {
+      sel.style.borderColor = '';
+      const key = sel.dataset.batch + '||' + sel.dataset.provider;
+      assignments.set(key, sel.value);
+    }
+  });
+
+  if (!valid) {
+    alert('Please assign a warehouse to all shipments before confirming.');
+    return;
+  }
+
+  // Save mappings for the future
+  let pastMappings = {};
+  try { pastMappings = JSON.parse(localStorage.getItem(LS_WH_MAPPING) || '{}'); } catch(e){}
+  
+  for (const [key, whId] of assignments) {
+    const [batch, prov] = key.split('||');
+    pastMappings[prov] = whId;
+  }
+  localStorage.setItem(LS_WH_MAPPING, JSON.stringify(pastMappings));
+
+  // Apply to pending data and push to main ledger
+  for (const p of STATE.materialReadiness.pendingUpload) {
+    p.warehouseId = assignments.get(p.shipmentBatch + '||' + p.provider);
+    STATE.materialReadiness.packingList.push(p);
+  }
+
+  STATE.materialReadiness.pendingUpload = [];
+  _mrFolderFiles = [];
+  document.getElementById('mrPendingWrap').classList.add('hidden');
+  document.getElementById('mrFolderPath').value = '';
+  document.getElementById('mrFolderInfo').textContent = 'Data loaded successfully. Select a new folder to load more.';
+  
+  renderMrLedger();
+  populateMrVehicleSelect();
+  if (STATE.materialReadiness.selectedVehicleBatch) renderMrReadiness();
+}
+
+/* =========================================================
+   READINESS CHECK
+   ========================================================= */
+function populateMrVehicleSelect() {
+  const sel = document.getElementById('mrVehicleSelect');
+  if (!sel) return;
+  const batches = STATE.batches || [];
+  sel.innerHTML = `<option value="">— select vehicle batch —</option>` + 
+    batches.map(b => `<option value="${escapeHtml(b.batch)}">${escapeHtml(b.batch)} (${escapeHtml(b.model)})</option>`).join('');
+}
+
+function renderMrReadiness() {
+  const batchId = document.getElementById('mrVehicleSelect').value;
+  STATE.materialReadiness.selectedVehicleBatch = batchId;
+  const tbl = document.getElementById('mrTable');
+  const stats = document.getElementById('mrStats');
+
+  if (!batchId) {
+    tbl.innerHTML = '';
+    stats.innerHTML = '';
+    return;
+  }
+
+  const batch = STATE.batches.find(b => b.batch === batchId);
+  if (!batch) return;
+
+  const bomKey = resolveBomKeyForBatch(batch);
+  const bom = STATE.boms.find(b => bomKeyOf(b) === bomKey);
+  
+  if (!bom) {
+    tbl.innerHTML = `<thead><tr><th>No BOM linked to this vehicle batch.</th></tr></thead>`;
+    stats.innerHTML = '';
+    return;
+  }
+
+  // 1. Calculate Requirements
+  const reqs = new Map();
+  for (const p of bom.parts) {
+    reqs.set(p.partNo, (reqs.get(p.partNo) || 0) + p.qty);
+  }
+
+  // 2. Compare against Shipment Ledger
+  const rows = [];
+  let totalReady = 0;
+  let totalShort = 0;
+
+  const packingList = STATE.materialReadiness.packingList || [];
+
+  for (const [partNo, reqQty] of reqs.entries()) {
+    const info = STATE.partIndex[partNo] || {};
+    
+    // Find available shipments for this part
+    const shipments = packingList.filter(s => s.partNo === partNo && (s.totalQty - s.allocatedQty) > 0);
+    const availQty = shipments.reduce((sum, s) => sum + (s.totalQty - s.allocatedQty), 0);
+    
+    const shortQty = Math.max(0, reqQty - availQty);
+    if (shortQty === 0) totalReady++;
+    else totalShort++;
+
+    rows.push({ partNo, info, reqQty, availQty, shortQty, shipments });
+  }
+
+  // Sort: Shortages first
+  rows.sort((a, b) => {
+    if (a.shortQty > 0 && b.shortQty === 0) return -1;
+    if (a.shortQty === 0 && b.shortQty > 0) return 1;
+    return a.partNo.localeCompare(b.partNo);
+  });
+
+  stats.innerHTML = `
+    <div class="stat">
+      <div class="label">Unique Materials</div>
+      <div class="value">${rows.length}</div>
+    </div>
+    <div class="stat">
+      <div class="label">Fully Covered</div>
+      <div class="value" style="color:var(--ok)">${totalReady}</div>
+    </div>
+    <div class="stat">
+      <div class="label">Shortages</div>
+      <div class="value" style="color:${totalShort ? 'var(--danger)' : 'inherit'}">${totalShort}</div>
+    </div>
+  `;
+
+  const head = `
+    <thead><tr>
+      <th>Material No.</th>
+      <th>Description</th>
+      <th class="num">Required</th>
+      <th class="num">Available</th>
+      <th class="num">Shortage</th>
+      <th class="num">Action</th>
+    </tr></thead>
+  `;
+
+  const body = rows.map(r => {
+    const isShort = r.shortQty > 0;
+    const btn = r.availQty > 0 
+      ? `<button class="btn tiny primary" data-part="${escapeHtml(r.partNo)}" data-req="${r.reqQty}" onclick="openMrAllocationModal('${escapeHtml(r.partNo)}', ${r.reqQty})">Link Shipment</button>`
+      : '<span class="hint">No Stock</span>';
+      
+    return `
+      <tr class="${isShort ? 'mr-short-row' : ''}">
+        <td class="mono"><b>${escapeHtml(r.partNo)}</b></td>
+        <td>${escapeHtml(r.info.nameEN || r.info.nameCN || '')}</td>
+        <td class="num">${fmt(r.reqQty)} <small>${escapeHtml(r.info.uom)}</small></td>
+        <td class="num" style="color:${r.availQty > 0 ? 'var(--ok)' : 'inherit'}">${fmt(r.availQty)}</td>
+        <td class="num" style="color:${isShort ? 'var(--danger)' : 'inherit'}; font-weight:${isShort ? '600' : '400'}">${isShort ? fmt(r.shortQty) : '—'}</td>
+        <td>${btn}</td>
+      </tr>
+    `;
+  }).join('');
+
+  tbl.innerHTML = head + `<tbody>${body}</tbody>`;
+}
+
+/* =========================================================
+   MANUAL ALLOCATION MODAL
+   ========================================================= */
+function openMrAllocationModal(partNo, reqQty) {
+  const batchId = STATE.materialReadiness.selectedVehicleBatch;
+  if (!batchId) return;
+
+  const packingList = STATE.materialReadiness.packingList;
+  const availableShipments = packingList.filter(s => s.partNo === partNo && (s.totalQty - s.allocatedQty) > 0);
+
+  if (!availableShipments.length) return;
+
+  // Create Modal container
+  let modal = document.getElementById('mrAllocModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'mrAllocModal';
+    modal.className = 'modal-overlay hidden';
+    modal.innerHTML = `
+      <div class="modal-box" style="width:min(700px,100%)">
+        <div class="modal-header">
+          <div>
+            <h3>Link Shipment — ${escapeHtml(partNo)}</h3>
+            <div class="bdm-subtitle">Select which containers to pull from. Required: ${fmt(reqQty)}</div>
+          </div>
+          <button class="modal-close" onclick="closeMrAllocModal()">✕</button>
+        </div>
+        <div class="modal-body" style="padding:16px 20px;">
+          <div id="mrAllocList"></div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn primary" id="mrAllocConfirm">✓ Confirm Allocation</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+  }
+
+  const list = document.getElementById('mrAllocList');
+  list.innerHTML = availableShipments.map((s, i) => {
+    const avail = s.totalQty - s.allocatedQty;
+    return `
+      <div class="mr-alloc-row" data-idx="${i}">
+        <div>
+          <b class="mono">${escapeHtml(s.shipmentBatch)}</b> / ${escapeHtml(s.containerId)} <br>
+          <small style="color:var(--muted)">${escapeHtml(s.provider)} (WH: ${escapeHtml(s.warehouseId)})</small>
+        </div>
+        <div class="num">Available: <b>${fmt(avail)}</b></div>
+        <div></div>
+        <div>
+          <input type="number" class="mr-alloc-input" data-idx="${i}" max="${avail}" min="0" value="0" />
+        </div>
+      </div>
+    `;
+  }).join('');
+
+  // Store available shipments temporarily for the confirm button
+  modal._availableShipments = availableShipments;
+  modal._reqQty = reqQty;
+  modal._partNo = partNo;
+  modal._batchId = batchId;
+
+  document.getElementById('mrAllocConfirm').onclick = confirmMrAllocation;
+
+  modal.classList.remove('hidden');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeMrAllocModal() {
+  const modal = document.getElementById('mrAllocModal');
+  if (modal) modal.classList.add('hidden');
+  document.body.style.overflow = '';
+}
+
+function confirmMrAllocation() {
+  const modal = document.getElementById('mrAllocModal');
+  const inputs = document.querySelectorAll('.mr-alloc-input');
+  const available = modal._availableShipments;
+  const batchId = modal._batchId;
+  const partNo = modal._partNo;
+
+  let totalAllocated = 0;
+  const newAllocations = [];
+
+  for (const inp of inputs) {
+    const idx = Number(inp.dataset.idx);
+    const qty = Number(inp.value) || 0;
+    if (qty > 0) {
+      const ship = available[idx];
+      newAllocations.push({ ship, qty });
+      totalAllocated += qty;
+    }
+  }
+
+  if (totalAllocated === 0) {
+    alert('Please enter a quantity to allocate.');
+    return;
+  }
+
+  // Save to Ledger
+  for (const alloc of newAllocations) {
+    const ship = alloc.ship;
+    
+    // Update packed list available qty
+    const pIdx = STATE.materialReadiness.packingList.findIndex(x => x === ship);
+    if (pIdx >= 0) STATE.materialReadiness.packingList[pIdx].allocatedQty += alloc.qty;
+
+    // Add to allocation ledger
+    STATE.materialReadiness.allocations.push({
+      id: crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random()),
+      vehicleBatch: batchId,
+      shipmentBatch: ship.shipmentBatch,
+      containerId: ship.containerId,
+      partNo: partNo,
+      qty: alloc.qty,
+      provider: ship.provider,
+      warehouseId: ship.warehouseId,
+      date: new Date().toISOString()
+    });
+  }
+
+  closeMrAllocModal();
+  renderMrReadiness();
+  renderMrLedger();
+}
+
+/* =========================================================
+   LEDGER (TRACEABILITY)
+   ========================================================= */
+function renderMrLedger() {
+  const tbl = document.getElementById('mrLedgerTable');
+  if (!tbl) return;
+
+  const q = (document.getElementById('mrLedgerSearch').value || '').toLowerCase();
+  let allocs = STATE.materialReadiness.allocations || [];
+
+  if (q) {
+    allocs = allocs.filter(a => 
+      a.vehicleBatch.toLowerCase().includes(q) || 
+      a.shipmentBatch.toLowerCase().includes(q) ||
+      a.partNo.toLowerCase().includes(q)
+    );
+  }
+
+  // Sort newest first
+  allocs = allocs.slice().sort((a,b) => (b.date||'').localeCompare(a.date||''));
+
+  if (!allocs.length) {
+    tbl.innerHTML = '<thead><tr><th>No allocations found.</th></tr></thead>';
+    return;
+  }
+
+  const head = `
+    <thead><tr>
+      <th>Date</th>
+      <th>Vehicle Batch</th>
+      <th>Part No.</th>
+      <th>Qty Used</th>
+      <th>Shipment Batch</th>
+      <th>Container</th>
+      <th>Warehouse</th>
+      <th>Provider</th>
+      <th></th>
+    </tr></thead>
+  `;
+
+  const body = allocs.map(a => `
+    <tr>
+      <td>${fmtDate(new Date(a.date))}</td>
+      <td class="mono"><b>${escapeHtml(a.vehicleBatch)}</b></td>
+      <td class="mono">${escapeHtml(a.partNo)}</td>
+      <td class="num" style="font-weight:600;color:var(--brand)">${fmt(a.qty)}</td>
+      <td class="mono">${escapeHtml(a.shipmentBatch)}</td>
+      <td>${escapeHtml(a.containerId)}</td>
+      <td><span class="sf-badge kind">${escapeHtml(a.warehouseId)}</span></td>
+      <td>${escapeHtml(a.provider)}</td>
+      <td><button class="btn tiny danger" onclick="unallocateMr('${a.id}')" title="Remove Link">✕</button></td>
+    </tr>
+  `).join('');
+
+  tbl.innerHTML = head + `<tbody>${body}</tbody>`;
+}
+
+function unallocateMr(allocId) {
+  if (!confirm('Remove this allocation? The parts will be returned to available stock.')) return;
+
+  const allocIdx = STATE.materialReadiness.allocations.findIndex(a => a.id === allocId);
+  if (allocIdx < 0) return;
+
+  const alloc = STATE.materialReadiness.allocations[allocIdx];
+
+  // Return qty to packing list
+  const ship = STATE.materialReadiness.packingList.find(s => 
+    s.shipmentBatch === alloc.shipmentBatch && 
+    s.containerId === alloc.containerId && 
+    s.partNo === alloc.partNo
+  );
+
+  if (ship) ship.allocatedQty = Math.max(0, ship.allocatedQty - alloc.qty);
+
+  // Remove from allocations
+  STATE.materialReadiness.allocations.splice(allocIdx, 1);
+
+  renderMrLedger();
+  if (STATE.materialReadiness.selectedVehicleBatch) renderMrReadiness();
+}
+
+/* =========================================================
+   EXPORT
+   ========================================================= */
+function exportMrLedger() {
+  const allocs = STATE.materialReadiness.allocations || [];
+  if (!allocs.length) { alert('No data to export.'); return; }
+
+  const aoa = [
+    ['Allocation Traceability Ledger'],
+    ['Date', 'Vehicle Batch', 'Part No.', 'Qty Used', 'Shipment Batch', 'Container', 'Warehouse', 'Provider']
+  ];
+
+  allocs.forEach(a => {
+    aoa.push([
+      fmtDate(new Date(a.date)), a.vehicleBatch, a.partNo, a.qty, 
+      a.shipmentBatch, a.containerId, a.warehouseId, a.provider
+    ]);
+  });
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Allocation Ledger');
+  downloadWorkbook(wb, `Material_Allocation_${dateStamp()}.xlsx`);
+}
+
+/* =========================================================
+   AUTO-LINK (Helper if needed later, currently manual as requested)
+   ========================================================= */
+function autoLinkReadiness() {
+  alert('Auto-link logic requires you to confirm manual allocations first. Please use the "Link Shipment" buttons.');
+}
+
+/* Initialize the module on load */
+window.addEventListener('DOMContentLoaded', () => {
+  setTimeout(initMaterialReadiness, 100); // Slight delay ensures base UI is ready
+});
+/* =========================================================
+   BULK MATERIAL SEARCH & ADVANCED EXPORTS
+   ========================================================= */
+STATE.bulkSearchList = null; // null = inactive, Array = active search
+
+function initBulkSearch() {
+  const toolbar = document.querySelector('#panel-bom .toolbar');
+  if (!toolbar) return;
+
+  // Inject Buttons next to the existing Export button
+  const bulkBtn = document.createElement('button');
+  bulkBtn.className = 'btn primary';
+  bulkBtn.innerHTML = '📋 Bulk Search';
+  bulkBtn.onclick = openBulkSearchModal;
+
+  const masterBtn = document.createElement('button');
+  masterBtn.className = 'btn';
+  masterBtn.innerHTML = '⤓ Export Master List';
+  masterBtn.onclick = exportMasterWhereUsed;
+
+  toolbar.appendChild(bulkBtn);
+  toolbar.appendChild(masterBtn);
+}
+
+function openBulkSearchModal() {
+  let modal = document.getElementById('bulkSearchModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'bulkSearchModal';
+    modal.className = 'modal-overlay hidden';
+    modal.innerHTML = `
+      <div class="modal-box" style="width:min(600px,100%)">
+        <div class="modal-header">
+          <div>
+            <h3>Bulk Material Search</h3>
+            <div class="bdm-subtitle">Paste material numbers below. Separate by new lines or commas.</div>
+          </div>
+          <button class="modal-close" onclick="document.getElementById('bulkSearchModal').classList.add('hidden')">✕</button>
+        </div>
+        <div class="modal-body" style="padding:16px 20px;">
+          <textarea id="bulkSearchInput" style="width:100%; height:200px; padding:10px; border:1px solid var(--border); border-radius:8px; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:13px;" placeholder="e.g.&#10;403003460AAAXX&#10;555000001AAAXX"></textarea>
+          <div style="margin-top:12px; display:flex; gap:8px; justify-content:flex-end;">
+            <button class="btn ghost" id="bulkSearchClear" onclick="clearBulkSearch()">Clear & Reset</button>
+            <button class="btn primary" id="bulkSearchApply">Apply Search</button>
+          </div>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+
+    document.getElementById('bulkSearchApply').onclick = () => {
+      const text = document.getElementById('bulkSearchInput').value;
+      const parts = text.split(/[\n,]+/).map(s => s.trim()).filter(Boolean);
+      
+      if (!parts.length) {
+        clearBulkSearch();
+        return;
+      }
+      
+      STATE.bulkSearchList = Array.from(new Set(parts)); // Deduplicate
+      modal.classList.add('hidden');
+      
+      // Clear standard search and filter to avoid conflicts
+      document.getElementById('bomSearch').value = '';
+      document.getElementById('bomFilter').value = 'all';
+      
+      renderBomTable();
+    };
+  }
+  
+  modal.classList.remove('hidden');
+  document.getElementById('bulkSearchInput').focus();
+}
+
+/* NEW: Global clear function */
+function clearBulkSearch() {
+  // 1. Clear state variables
+  STATE.bulkSearchList = null;
+  WHERE_USED_OPEN.clear(); // Collapse all auto-expanded rows
+  
+  // 2. Clear UI inputs
+  const searchInp = document.getElementById('bulkSearchInput');
+  if (searchInp) searchInp.value = '';
+  document.getElementById('bomSearch').value = '';
+  document.getElementById('bomFilter').value = 'all';
+  
+  // 3. Hide modal
+  const modal = document.getElementById('bulkSearchModal');
+  if (modal) modal.classList.add('hidden');
+  
+  // 4. Re-render the clean full list
+  renderBomTable();
+}
+/* =========================================================
+   EXPORT 1: BULK SEARCH RESULTS (Flattened)
+   ========================================================= */
+function exportBulkWhereUsed() {
+  if (!STATE.bulkSearchList || !STATE.bulkSearchList.length) {
+    alert('No active bulk search list to export.');
+    return;
+  }
+
+  const aoa = [
+    ['Material No.', 'Description', 'Spec Name', 'Model', 'BOM ID', 'Color Code', 'Sales Batch', 'Qty per Vehicle', 'UoM']
+  ];
+
+  // Iterate in the exact order the user pasted them
+  for (const partNo of STATE.bulkSearchList) {
+    const p = STATE.partIndex[partNo];
+    
+    // If part is not found in master data
+    if (!p) {
+      aoa.push([partNo, '⚠ NOT FOUND IN MASTER DATA', '', '', '', '', '', '', '']);
+      continue;
+    }
+
+    const bomsForPart = Array.from(p.bomKeys)
+      .map(key => STATE.boms.find(b => bomKeyOf(b) === key))
+      .filter(Boolean);
+
+    if (!bomsForPart.length) {
+      aoa.push([partNo, p.nameEN || p.nameCN || '', 'No BOM data', '', '', '', '', '', '']);
+      continue;
+    }
+
+    // Flatten every BOM this part is used in
+    for (const bom of bomsForPart) {
+      const specKey = specKeyOf(bom.vehicleMatNo);
+      const specBoms = STATE.boms.filter(b => specKeyOf(b.vehicleMatNo) === specKey);
+      const specName = deriveSpecName(specBoms);
+      const cc = colorCodeOf(bom.vehicleMatNo);
+      
+      const key = bomKeyOf(bom);
+      const qty = p.perBomQty[key] || 0;
+
+      aoa.push([
+        partNo,
+        p.nameEN || p.nameCN || '',
+        specName,
+        bom.vehicleDesc || '',
+        bom.bomId || '',
+        cc,
+        bom.batchId || '',
+        qty,
+        p.uom || ''
+      ]);
+    }
+  }
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Bulk Search Results');
+  downloadWorkbook(wb, `Bulk_WhereUsed_${dateStamp()}.xlsx`);
+}
+
+/* =========================================================
+   EXPORT 2: MASTER LIST (Flattened)
+   ========================================================= */
+function exportMasterWhereUsed() {
+  const rows = Object.values(STATE.partIndex);
+  if (!rows.length) {
+    alert('No material data loaded.');
+    return;
+  }
+
+  const aoa = [
+    ['Material No.', 'Description', 'UoM', 'Type', 'Spec Name', 'Model', 'BOM ID', 'Color Code', 'Sales Batch', 'Qty per Vehicle']
+  ];
+
+  // Sort parts alphabetically
+  rows.sort((a, b) => a.partNo.localeCompare(b.partNo, undefined, { numeric: true }));
+
+  for (const p of rows) {
+    const bomsForPart = Array.from(p.bomKeys)
+      .map(key => STATE.boms.find(b => bomKeyOf(b) === key))
+      .filter(Boolean);
+
+    if (!bomsForPart.length) {
+      aoa.push([p.partNo, p.nameEN || p.nameCN || '', p.uom, p.isCommon ? 'COMMON' : 'SPECIFIC', '', '', '', '', '', '']);
+      continue;
+    }
+
+    for (const bom of bomsForPart) {
+      const specKey = specKeyOf(bom.vehicleMatNo);
+      const specBoms = STATE.boms.filter(b => specKeyOf(b.vehicleMatNo) === specKey);
+      const specName = deriveSpecName(specBoms);
+      const cc = colorCodeOf(bom.vehicleMatNo);
+      
+      const key = bomKeyOf(bom);
+      const qty = p.perBomQty[key] || 0;
+
+      aoa.push([
+        p.partNo,
+        p.nameEN || p.nameCN || '',
+        p.uom,
+        p.isCommon ? 'COMMON' : 'SPECIFIC',
+        specName,
+        bom.vehicleDesc || '',
+        bom.bomId || '',
+        cc,
+        bom.batchId || '',
+        qty
+      ]);
+    }
+  }
+
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, aoaToSheet(aoa), 'Master Where Used');
+  downloadWorkbook(wb, `Master_WhereUsed_${dateStamp()}.xlsx`);
+}
+
+/* Initialize on load */
+window.addEventListener('DOMContentLoaded', () => {
+  setTimeout(initBulkSearch, 150);
+});
+window.MRP = STATE;
