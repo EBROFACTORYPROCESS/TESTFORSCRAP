@@ -1277,27 +1277,40 @@ function applyLoadedData(rawData, loading, root) {
 // File Picker & Reader
 // ============================
 
-function showDataFilePicker(errorMessage) {
-    const loading = document.getElementById('app-loading');
-    const root = document.getElementById('app-root');
-    if (loading) loading.style.display = 'none';
-    if (root) root.style.display = 'none';
+function showDataFilePicker(options) {
+    // Backward compatible: allow a plain string (boot error path) or an options object.
+    let opts = options;
+    if (typeof options === 'string' || options === null || options === undefined) {
+        opts = { errorMessage: options || null, mode: 'boot' };
+    }
+    const mode = opts.mode === 'reselect' ? 'reselect' : 'boot';
+    const errorMessage = opts.errorMessage || null;
 
-    // Remove any prior instance so re-entry is clean.
+    // Boot mode hides the app; re-select mode keeps it visible behind the modal.
+    if (mode === 'boot') {
+        const loading = document.getElementById('app-loading');
+        const root = document.getElementById('app-root');
+        if (loading) loading.style.display = 'none';
+        if (root) root.style.display = 'none';
+    }
+
     const prior = document.getElementById('dataFilePickerOverlay');
     if (prior) prior.remove();
+
+    const subtitle = mode === 'reselect'
+        ? 'This will replace the currently loaded data in this browser. Choose a <strong>data.json</strong> file.'
+        : 'Choose the shared <strong>data.json</strong> file to load the process data.';
 
     const overlay = document.createElement('div');
     overlay.id = 'dataFilePickerOverlay';
     overlay.className = 'custom-modal-overlay active';
     overlay.innerHTML = `
         <div class="custom-modal">
-            <h3>📂 Select data.json</h3>
-            <p style="margin:0.75rem 0;color:#475569;">
-                Choose the shared <strong>data.json</strong> file to load the process data.
-            </p>
+            <h3>📂 ${mode === 'reselect' ? 'Re-select data.json' : 'Select data.json'}</h3>
+            <p style="margin:0.75rem 0;color:#475569;">${subtitle}</p>
             ${errorMessage ? `<p style="margin:0.75rem 0;color:#dc2626;font-weight:600;">${escapeHtml(errorMessage)}</p>` : ''}
             <div class="modal-buttons">
+                ${mode === 'reselect' ? '<button id="dataFileCancelBtn" class="cancel-btn">Cancel</button>' : ''}
                 <button id="dataFileSelectBtn" class="save-btn">Select file</button>
             </div>
             <input type="file" id="dataFileInput" accept=".json,application/json" style="display:none;">
@@ -1310,18 +1323,33 @@ function showDataFilePicker(errorMessage) {
 
     selectBtn.onclick = () => fileInput.click();
 
+    if (mode === 'reselect') {
+        const cancelBtn = document.getElementById('dataFileCancelBtn');
+        if (cancelBtn) {
+            cancelBtn.onclick = () => {
+                overlay.remove();
+                // Nothing was touched — previous appData and localStorage remain intact.
+            };
+        }
+    }
+
     fileInput.onchange = () => {
         const file = fileInput.files && fileInput.files[0];
         if (!file) return;
         readDataFile(
             file,
             () => {
-                // Success: remove overlay, show root.
                 overlay.remove();
+                if (mode === 'reselect') {
+                    refreshScenarioDropdown();
+                    rebuildFilterUI();
+                    updateUIVisibility();
+                    renderCurrentView();
+                }
             },
             (msg) => {
-                // Failure: re-show picker with the message.
-                showDataFilePicker(msg);
+                // Re-open picker with error, preserving mode and previous data.
+                showDataFilePicker({ errorMessage: msg, mode: mode });
             }
         );
     };
@@ -2479,7 +2507,9 @@ function renderApp() {
                 <div class="top-header">
                     <div class="title-section"><h1>📊 Business Process Orchestrator</h1><p>EBRO Factory Repository for all business processes details</p></div>
                     <div>
-                        <button id="saveDataBtn" class="save-html-btn" style="display:inline-flex;">💾 Save data.json</button>                        <button id="settingsBtn" class="settings-btn" style="display:inline-flex;">⚙️ Master Data</button>
+                        <button id="saveDataBtn" class="save-html-btn" style="display:inline-flex;">💾 Save data.json</button>
+                        <button id="reselectDataFileBtn" class="settings-btn" style="display:none;">📂 Re-select data.json</button>
+                        <button id="settingsBtn" class="settings-btn" style="display:inline-flex;">⚙️ Master Data</button>
                         <button id="modeToggleBtn" class="mode-toggle-btn">👁️ Display Mode</button>
                     </div>
                 </div>
@@ -2788,6 +2818,13 @@ function bindEvents() {
         saveDataToFile();
     };
 
+    const reselectBtn = document.getElementById('reselectDataFileBtn');
+    if (reselectBtn) {
+        reselectBtn.onclick = () => {
+            showDataFilePicker({ errorMessage: null, mode: 'reselect' });
+        };
+    }
+
     document.getElementById('settingsBtn').onclick = () => {
         refreshMasterUI();
         document.getElementById('masterModal').classList.add('active');
@@ -2910,11 +2947,13 @@ function updateUIVisibility() {
     const addBtn = document.getElementById('addRowBtn');
     const importBtn = document.getElementById('importProcessesBtn');
     const saveBtn = document.getElementById('saveDataBtn');
+    const reselectBtn = document.getElementById('reselectDataFileBtn');
     const modeBtn = document.getElementById('modeToggleBtn');
 
     if (addBtn) addBtn.style.display = isEdit ? 'inline-flex' : 'none';
     if (importBtn) importBtn.style.display = isEdit ? 'inline-flex' : 'none';
     if (saveBtn) saveBtn.style.display = isEdit ? 'inline-flex' : 'none';
+    if (reselectBtn) reselectBtn.style.display = isEdit ? 'inline-flex' : 'none';
     if (modeBtn) modeBtn.innerHTML = isEdit ? '👁️ Display Mode' : '✏️ Edit Mode';
 
     const token = getGitHubToken();
