@@ -2953,7 +2953,7 @@ function updateUIVisibility() {
     if (addBtn) addBtn.style.display = isEdit ? 'inline-flex' : 'none';
     if (importBtn) importBtn.style.display = isEdit ? 'inline-flex' : 'none';
     if (saveBtn) saveBtn.style.display = isEdit ? 'inline-flex' : 'none';
-    if (reselectBtn) reselectBtn.style.display = isEdit ? 'inline-flex' : 'none';
+    if (reselectBtn) reselectBtn.style.display = 'inline-flex';
     if (modeBtn) modeBtn.innerHTML = isEdit ? '👁️ Display Mode' : '✏️ Edit Mode';
 
     const token = getGitHubToken();
