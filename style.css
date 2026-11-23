@@ -705,8 +705,11 @@ body {
     cursor: default !important;
 }
 </style>
+#startGuideModal {
+    z-index: 10000; /* Force it above the file picker */
+}
+
 .start-guide-modal {
-    z-index: 10000; 
     max-width: 560px;
     text-align: left;
 }
