@@ -1189,21 +1189,13 @@ function normalizeWorkflowData(workflow) {
 async function loadData() {
     console.log('📊 loadData() called');
     
-    // --- SHOW THE GUIDE RIGHT AWAY ---
-    if (shouldShowStartGuide()) {
-        showStartGuide();
-    }
-    // ----------------------------------
-    
     const loading = document.getElementById('app-loading');
     const root = document.getElementById('app-root');
 
     if (loading) loading.style.display = 'flex';
     if (root) root.style.display = 'none';
 
-    // --------------------------------------------------------------
-    // Source 1: previously-picked data stored in localStorage
-    // --------------------------------------------------------------
+    // 1. Check if data is already stored
     let stored = null;
     try {
         stored = localStorage.getItem('bpo_data');
@@ -1211,34 +1203,39 @@ async function loadData() {
         console.warn('localStorage read failed:', e);
     }
 
+    let isValidStoredData = false;
+    let parsed = null;
     if (stored) {
-        let parsed = null;
-        let ok = false;
         try {
             parsed = JSON.parse(stored);
-            ok = isDataShapeValid(parsed);
+            isValidStoredData = isDataShapeValid(parsed);
         } catch (e) {
-            console.warn('Stored bpo_data is not valid JSON:', e);
-            ok = false;
+            isValidStoredData = false;
         }
-        if (ok) {
-            applyLoadedData(parsed, loading, root);
-            return;
-        }
-        console.warn('Stored bpo_data failed validation — requesting file pick.');
-        showDataFilePicker(
-            'Invalid loaded data. Please choose the correct data file. ' +
-            'In case of questions, please reach out to the Key User of the tool.'
-        );
-        return;
     }
 
-    // --------------------------------------------------------------
-    // Source 2: first visit — request file
-    // --------------------------------------------------------------
-    showDataFilePicker(null);
-}
+    // 2. Define the action that happens AFTER the guide is closed
+    const proceedWithLoad = () => {
+        if (isValidStoredData) {
+            applyLoadedData(parsed, loading, root);
+        } else {
+            if (stored) {
+                showDataFilePicker('Invalid loaded data. Please choose the correct data file. In case of questions, please reach out to the Key User of the tool.');
+            } else {
+                showDataFilePicker(null);
+            }
+        }
+    };
 
+    // 3. Show Guide First, then Proceed
+    if (shouldShowStartGuide()) {
+        // Show the guide. When they click "Got it", it triggers proceedWithLoad()
+        showStartGuide(proceedWithLoad);
+    } else {
+        // If they've seen the guide, just proceed immediately
+        proceedWithLoad();
+    }
+}
 /**
  * Minimal shape check for data.json.
  * Only enforces: scenarios is an array of objects, each with a processes array.
@@ -2648,48 +2645,6 @@ function renderApp() {
             </div>
             <input type="file" id="masterImportFile" accept=".csv" style="display:none">
             <input type="file" id="processImportFile" accept=".csv" style="display:none">
-                        <!-- START GUIDE MODAL -->
-            <div id="startGuideModal" class="custom-modal-overlay">
-                <div class="custom-modal start-guide-modal">
-                    <h3>👋 Welcome to Business Process Orchestrator</h3>
-                    <p style="margin:0.5rem 0 1rem;color:#475569;">
-                        Here's how to get started in 3 quick steps:
-                    </p>
-
-                    <ol class="start-guide-steps">
-                        <li>
-                            <strong>📂 Load your data file</strong><br>
-                            Click <em>"Select file"</em> and choose the shared <code>data.json</code>.
-                            The app remembers it in this browser, so you only do this once per browser.
-                        </li>
-                        <li>
-                            <strong>👁️ Explore in Display Mode</strong><br>
-                            Browse the Process Table, Process Tree, and Workflow views.
-                            Click any process name or double-click a workflow node to see full details.
-                        </li>
-                        <li>
-                            <strong>✏️ Edit when needed</strong><br>
-                            Click <em>"Edit Mode"</em> and enter the edit password.
-                            You can add processes, edit RACI, drag workflow nodes, and connect them with arrows.
-                        </li>
-                    </ol>
-
-                    <div class="start-guide-extra">
-                        <strong>💾 Saving changes</strong> — use <em>"Save data.json"</em> to write a new file to disk.
-                        <br>
-                        <strong>📂 Switching files</strong> — use <em>"Re-select data.json"</em> to load a different file later.
-                    </div>
-
-                    <label class="start-guide-dontshow">
-                        <input type="checkbox" id="startGuideDontShow">
-                        Don't show this guide again
-                    </label>
-
-                    <div class="modal-buttons">
-                        <button id="startGuideCloseBtn" class="save-btn">Got it, let's start 🚀</button>
-                    </div>
-                </div>
-            </div>
         `;
     }
 
@@ -2698,11 +2653,6 @@ function renderApp() {
     rebuildFilterUI();
     bindEvents();
     renderCurrentView();
-        // Show the first-time start guide (only if not previously dismissed)
-    if (shouldShowStartGuide()) {
-        // Small delay so the DOM is fully painted before the overlay appears.
-        setTimeout(showStartGuide, 300);
-    }
     console.log('✅ renderApp() completed');
 }
 
@@ -3527,7 +3477,59 @@ function markStartGuideDismissed(permanent) {
     }
 }
 
-function showStartGuide() {
+// 1. Create and inject the HTML immediately when app.js loads
+function injectStartGuideHTML() {
+    if (document.getElementById('startGuideModal')) return; // Already exists
+
+    const overlay = document.createElement('div');
+    overlay.id = 'startGuideModal';
+    overlay.className = 'custom-modal-overlay';
+    // Force it to sit on top of the file picker
+    overlay.style.zIndex = '10000'; 
+    overlay.style.display = 'none'; // Hidden by default
+
+    overlay.innerHTML = `
+        <div class="custom-modal start-guide-modal">
+            <h3>👋 Welcome to Business Process Orchestrator</h3>
+            <p style="margin:0.5rem 0 1rem;color:#475569;">
+                Here's how to get started in 3 quick steps:
+            </p>
+            <ol class="start-guide-steps">
+                <li>
+                    <strong>📂 Load your data file</strong><br>
+                    Click <em>"Select file"</em> and choose the shared <code>data.json</code>.
+                    The app remembers it in this browser, so you only do this once per browser.
+                </li>
+                <li>
+                    <strong>👁️ Explore in Display Mode</strong><br>
+                    Browse the Process Table, Process Tree, and Workflow views.
+                    Click any process name or double-click a workflow node to see full details.
+                </li>
+                <li>
+                    <strong>✏️ Edit when needed</strong><br>
+                    Click <em>"Edit Mode"</em> and enter the edit password.
+                    You can add processes, edit RACI, drag workflow nodes, and connect them with arrows.
+                </li>
+            </ol>
+            <div class="start-guide-extra">
+                <strong>💾 Saving changes</strong> — use <em>"Save data.json"</em> to write a new file to disk.
+                <br>
+                <strong>📂 Switching files</strong> — use <em>"Re-select data.json"</em> to load a different file later.
+            </div>
+            <label class="start-guide-dontshow">
+                <input type="checkbox" id="startGuideDontShow">
+                Don't show this guide again
+            </label>
+            <div class="modal-buttons">
+                <button id="startGuideCloseBtn" class="save-btn">Got it, let's start 🚀</button>
+            </div>
+        </div>
+    `;
+    document.body.appendChild(overlay);
+}
+
+// 2. The function to actually show it
+function showStartGuide(onCloseCallback) {
     const modal = document.getElementById('startGuideModal');
     if (!modal) return;
 
@@ -3539,11 +3541,21 @@ function showStartGuide() {
             const permanent = !!(dontShowChk && dontShowChk.checked);
             markStartGuideDismissed(permanent);
             modal.classList.remove('active');
+            modal.style.display = 'none';
+            
+            // If we passed a callback (like opening the file picker), run it now
+            if (typeof onCloseCallback === 'function') {
+                onCloseCallback();
+            }
         };
     }
 
+    modal.style.display = 'flex'; // Show flex to center it
     modal.classList.add('active');
 }
+
+// 3. Inject the HTML as soon as this script runs
+injectStartGuideHTML();
 // ✅ Connection handling with validation
 function validateConnection(workflow, fromId, toId) {
     if (fromId === toId) {
