@@ -706,6 +706,7 @@ body {
 }
 </style>
 .start-guide-modal {
+    z-index: 10000; 
     max-width: 560px;
     text-align: left;
 }
