@@ -3508,43 +3508,6 @@ function setupWorkflowDrag(container) {
 // Start Guide (First-Time Onboarding)
 // ============================
 
-
-function markStartGuideDismissed(permanent) {
-    if (!permanent) return;
-    try {
-        localStorage.setItem(START_GUIDE_KEY, 'true');
-    } catch (e) {
-        console.warn('Could not persist start-guide dismissal:', e);
-    }
-}
-// ============================
-// Start Guide (First-Time Onboarding)
-// ============================
-
-const START_GUIDE_KEY = 'bpo_startGuideDismissed';
-
-function shouldShowStartGuide() {
-    try {
-        return localStorage.getItem(START_GUIDE_KEY) !== 'true';
-    } catch (e) {
-        // If localStorage is unavailable, default to showing it once per session.
-        return true;
-    }
-}
-
-function markStartGuideDismissed(permanent) {
-    if (!permanent) return;
-    try {
-        localStorage.setItem(START_GUIDE_KEY, 'true');
-    } catch (e) {
-        console.warn('Could not persist start-guide dismissal:', e);
-    }
-}
-
-// ============================
-// Start Guide (First-Time Onboarding)
-// ============================
-
 const START_GUIDE_KEY = 'bpo_startGuideDismissed';
 
 function shouldShowStartGuide() {
