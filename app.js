@@ -1188,6 +1188,13 @@ function normalizeWorkflowData(workflow) {
 // ============================
 async function loadData() {
     console.log('📊 loadData() called');
+    
+    // --- SHOW THE GUIDE RIGHT AWAY ---
+    if (shouldShowStartGuide()) {
+        showStartGuide();
+    }
+    // ----------------------------------
+    
     const loading = document.getElementById('app-loading');
     const root = document.getElementById('app-root');
 
@@ -2641,47 +2648,6 @@ function renderApp() {
             </div>
             <input type="file" id="masterImportFile" accept=".csv" style="display:none">
             <input type="file" id="processImportFile" accept=".csv" style="display:none">
-            <div id="startGuideModal" class="custom-modal-overlay">
-                <div class="custom-modal start-guide-modal">
-                    <h3>👋 Welcome to Business Process Orchestrator</h3>
-                    <p style="margin:0.5rem 0 1rem;color:#475569;">
-                        Here's how to get started in 3 quick steps:
-                    </p>
-            
-                    <ol class="start-guide-steps">
-                        <li>
-                            <strong>📂 Load your data file</strong><br>
-                            Click <em>"Select file"</em> and choose the shared <code>data.json</code>.
-                            The app remembers it in this browser, so you only do this once per browser.
-                        </li>
-                        <li>
-                            <strong>👁️ Explore in Display Mode</strong><br>
-                            Browse the Process Table, Process Tree, and Workflow views.
-                            Click any process name or double-click a workflow node to see full details.
-                        </li>
-                        <li>
-                            <strong>✏️ Edit when needed</strong><br>
-                            Click <em>"Edit Mode"</em> and enter the edit password.
-                            You can add processes, edit RACI, drag workflow nodes, and connect them with arrows.
-                        </li>
-                    </ol>
-            
-                    <div class="start-guide-extra">
-                        <strong>💾 Saving changes</strong> — use <em>"Save data.json"</em> to write a new file to disk.
-                        <br>
-                        <strong>📂 Switching files</strong> — use <em>"Re-select data.json"</em> to load a different file later.
-                    </div>
-            
-                    <label class="start-guide-dontshow">
-                        <input type="checkbox" id="startGuideDontShow">
-                        Don't show this guide again
-                    </label>
-            
-                    <div class="modal-buttons">
-                        <button id="startGuideCloseBtn" class="save-btn">Got it, let's start 🚀</button>
-                    </div>
-                </div>
-            </div>
         `;
     }
 
@@ -3502,13 +3468,22 @@ function setupWorkflowDrag(container) {
 
 const START_GUIDE_KEY = 'bpo_startGuideDismissed';
 
-function shouldShowStartGuide() {
-    try {
-        return localStorage.getItem(START_GUIDE_KEY) !== 'true';
-    } catch (e) {
-        // If localStorage is unavailable, default to showing it once per session.
-        return true;
+function showStartGuide() {
+    const modal = document.getElementById('startGuideModal');
+    if (!modal) return;
+
+    const closeBtn = document.getElementById('startGuideCloseBtn');
+    const dontShowChk = document.getElementById('startGuideDontShow');
+
+    if (closeBtn) {
+        closeBtn.onclick = () => {
+            const permanent = !!(dontShowChk && dontShowChk.checked);
+            markStartGuideDismissed(permanent);
+            modal.classList.remove('active');
+        };
     }
+
+    modal.classList.add('active');
 }
 
 function markStartGuideDismissed(permanent) {
