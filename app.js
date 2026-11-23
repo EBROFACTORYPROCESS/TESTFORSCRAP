@@ -2511,11 +2511,11 @@ function renderApp() {
                 <div class="top-header">
                     <div class="title-section"><h1>📊 Business Process Orchestrator</h1><p>EBRO Factory Repository for all business processes details</p></div>
                     <div>
+                        <button id="showGuideBtn" class="settings-btn">❓ Guide</button>                    
                         <button id="saveDataBtn" class="save-html-btn" style="display:inline-flex;">💾 Save data.json</button>
                         <button id="reselectDataFileBtn" class="settings-btn" style="display:none;">📂 Re-select data.json</button>
                         <button id="settingsBtn" class="settings-btn" style="display:inline-flex;">⚙️ Master Data</button>
                         <button id="modeToggleBtn" class="mode-toggle-btn">👁️ Display Mode</button>
-                        <button id="showGuideBtn" class="settings-btn">❓ Guide</button>
                     </div>
                 </div>
                 <div class="scenario-panel">
