@@ -3487,7 +3487,48 @@ function setupWorkflowDrag(container) {
         }
     });
 }
+// ============================
+// Start Guide (First-Time Onboarding)
+// ============================
 
+const START_GUIDE_KEY = 'bpo_startGuideDismissed';
+
+function shouldShowStartGuide() {
+    try {
+        return localStorage.getItem(START_GUIDE_KEY) !== 'true';
+    } catch (e) {
+        // If localStorage is unavailable, default to showing it once per session.
+        return true;
+    }
+}
+
+function markStartGuideDismissed(permanent) {
+    if (!permanent) return;
+    try {
+        localStorage.setItem(START_GUIDE_KEY, 'true');
+    } catch (e) {
+        console.warn('Could not persist start-guide dismissal:', e);
+    }
+}
+
+function showStartGuide() {
+    const modal = document.getElementById('startGuideModal');
+    if (!modal) return;
+
+    // Wire up the close button (idempotent – overwrite is fine).
+    const closeBtn = document.getElementById('startGuideCloseBtn');
+    const dontShowChk = document.getElementById('startGuideDontShow');
+
+    if (closeBtn) {
+        closeBtn.onclick = () => {
+            const permanent = !!(dontShowChk && dontShowChk.checked);
+            markStartGuideDismissed(permanent);
+            modal.classList.remove('active');
+        };
+    }
+
+    modal.classList.add('active');
+}
 // ✅ Connection handling with validation
 function validateConnection(workflow, fromId, toId) {
     if (fromId === toId) {
