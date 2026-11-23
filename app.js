@@ -2511,6 +2511,7 @@ function renderApp() {
                         <button id="reselectDataFileBtn" class="settings-btn" style="display:none;">📂 Re-select data.json</button>
                         <button id="settingsBtn" class="settings-btn" style="display:inline-flex;">⚙️ Master Data</button>
                         <button id="modeToggleBtn" class="mode-toggle-btn">👁️ Display Mode</button>
+                        <button id="showGuideBtn" class="settings-btn">❓ Guide</button>
                     </div>
                 </div>
                 <div class="scenario-panel">
@@ -2689,6 +2690,11 @@ function renderApp() {
     rebuildFilterUI();
     bindEvents();
     renderCurrentView();
+        // Show the first-time start guide (only if not previously dismissed)
+    if (shouldShowStartGuide()) {
+        // Small delay so the DOM is fully painted before the overlay appears.
+        setTimeout(showStartGuide, 300);
+    }
     console.log('✅ renderApp() completed');
 }
 
@@ -2742,7 +2748,10 @@ function bindEvents() {
             alert(`✅ Scenario "${name}" created. Click "Save to GitHub" to persist it.`);
         }
     };
-
+    const guideBtn = document.getElementById('showGuideBtn');
+    if (guideBtn) {
+        guideBtn.onclick = () => showStartGuide();
+    };
     document.getElementById('renameScenarioBtn').onclick = () => {
         if (currentMode !== 'edit') return;
         let sc = getCurrentScenario();
