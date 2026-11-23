@@ -706,7 +706,13 @@ body {
 }
 </style>
 #startGuideModal {
-    z-index: 10000; /* Force it above the file picker */
+    z-index: 10000 !important; 
+    /* display: none is handled inline in JS */
+}
+
+/* Make sure active class shows it if your framework relies on it */
+#startGuideModal.active {
+    display: flex !important;
 }
 
 .start-guide-modal {
