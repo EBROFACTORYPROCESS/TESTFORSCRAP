@@ -2609,67 +2609,67 @@ function renderInventoryTable() {
 /* =========================================================
    BUTTONS
    ========================================================= */
+/* =========================================================
+   BUTTONS
+   ========================================================= */
 function bindButtons() {
-  $('#bomFolderPick').addEventListener('click', pickBomFolder);
-  $('#bomFolderProcess').addEventListener('click', processBomFolder);
+  /* BOM List */
+  $('#bomFolderPick')?.addEventListener('click', pickBomFolder);
+  $('#bomFolderProcess')?.addEventListener('click', processBomFolder);
   bindFolderFallback();
   bindBomListSearch();
-  $('#bomProgressToggle').addEventListener('click', () => {
+  $('#bomProgressToggle')?.addEventListener('click', () => {
     const list = $('#bomProgressList');
     const btn  = $('#bomProgressToggle');
     const nowHidden = list.classList.toggle('hidden');
     btn.textContent = nowHidden ? '▸ Display batch list' : '▾ Hide batch list';
   });
-  $('#batchLineFilter')?.addEventListener('change', renderBatchTable);   
-  $('#bomSearch').addEventListener('input', renderBomTable);
-  $('#bomFilter').addEventListener('change', renderBomTable);
-  $('#invSearch').addEventListener('input', renderInventoryTable);
-  $('#planSearch').addEventListener('input', renderPlanning);
-  $('#planOnlyShort').addEventListener('change', renderPlanning);
-  $('#batchSearch').addEventListener('input', renderBatchTable);
-  ['c_factoryFloor','c_edgeLine','c_inTransit','c_safety'].forEach(id =>
-  $('#'+id).addEventListener('change', renderPlanning));
-  $('#batchClearFilters').addEventListener('click', () => {
-    STATE.batchView = { sorts: {}, filters: {} };
-    $('#batchSearch').value = '';
-    renderBatchTable();
-  });
-  /* NEW — expand / collapse the batch tree */
-  $('#batchExpandAll')?.addEventListener('click', batchExpandAll);
-  $('#batchCollapseAll')?.addEventListener('click', batchCollapseAll);
-   
-  $('#autoClassify').addEventListener('click', () => {
-    classifyBatches(); renderBatchStats(); renderBatchTable();
-    computeInventory(); renderInventoryTable(); renderPlanning();
-  });
 
-  $('#planAdd').addEventListener('click', () => {
+  /* Material List */
+  $('#bomSearch')?.addEventListener('input', renderBomTable);
+  $('#bomFilter')?.addEventListener('change', renderBomTable);
+  $('#exportBom')?.addEventListener('click', exportBom);
+
+  /* Planning */
+  $('#planSearch')?.addEventListener('input', renderPlanning);
+  $('#planOnlyShort')?.addEventListener('change', renderPlanning);
+  $('#planAdd')?.addEventListener('click', () => {
     const bomKey = $('#planModel').value;
     const qty    = Number($('#planQty').value);
     if (!bomKey || !qty) return;
     STATE.plan.push({ bomKey, qty });
     $('#planQty').value = '';
-    renderPlanList(); renderPlanning();
+    renderPlanList();
+    renderPlanning();
   });
-  $('#planClear').addEventListener('click', () => { STATE.plan = []; renderPlanList(); renderPlanning(); });
-
-  $('#exportBom').addEventListener('click', exportBom);
-  $('#exportInv').addEventListener('click', exportInventory);
-  $('#exportPlan').addEventListener('click', exportPlan);
-
-  $('#whAdd').addEventListener('click', () => {
-    STATE.config.warehouses.push({ id: 'WH'+(STATE.config.warehouses.length+1), name:'New warehouse', enabled:true });
-    renderWarehouseEditor(); renderWarehouseChecklist(); renderBatchStats();
+  $('#planClear')?.addEventListener('click', () => {
+    STATE.plan = [];
+    renderPlanList();
+    renderPlanning();
   });
-  $('#whSave').addEventListener('click', saveWarehouses);
+  $('#exportPlan')?.addEventListener('click', exportPlan);
 
-  $('#convAdd').addEventListener('click', () => {
-    STATE.config.conversionTable.push({ modelo:'', color:'', vehicleMatNo:'' });
+  /* Settings — warehouses */
+  $('#whAdd')?.addEventListener('click', () => {
+    STATE.config.warehouses.push({
+      id: 'WH' + (STATE.config.warehouses.length + 1),
+      name: 'New warehouse',
+      enabled: true
+    });
+    renderWarehouseEditor();
+    renderWarehouseChecklist();
+  });
+  $('#whSave')?.addEventListener('click', saveWarehouses);
+
+  /* Settings — conversion table */
+  $('#convAdd')?.addEventListener('click', () => {
+    STATE.config.conversionTable.push({ modelo: '', color: '', vehicleMatNo: '' });
     renderConversionTable();
   });
-  $('#convSave').addEventListener('click', saveConversionTable);
+  $('#convSave')?.addEventListener('click', saveConversionTable);
 
-  $('#resetAll').addEventListener('click', () => {
+  /* Settings — reset */
+  $('#resetAll')?.addEventListener('click', () => {
     if (!confirm('Erase all uploaded data and local overrides?')) return;
     STATE.boms = []; STATE.batches = []; STATE.plan = []; STATE.scrap = [];
     STATE.inventory = {}; STATE.partIndex = {};
@@ -2678,11 +2678,10 @@ function bindButtons() {
     STATE.bomCounter  = new Map();
     STATE.mrpStock = {
       items: [], byPartNo: {}, loaded: false, fileName: '',
-      model: '', variantKey: '',
-      demands: []
+      model: '', variantKey: '', demands: []
     };
     const sp = $('#stockFilePath'); if (sp) sp.value = '';
-    const si = $('#stockFileInfo'); if (si) si.textContent = 'No stock file loaded.';     
+    const si = $('#stockFileInfo'); if (si) si.textContent = 'No stock file loaded.';
     WHERE_USED_OPEN.clear();
     savePersistedScrap();
     try { localStorage.removeItem(LS_CONFIG); } catch(e){}
@@ -2698,12 +2697,16 @@ function bindButtons() {
     $('#bomProgressToggle').classList.add('hidden');
     $('#bomProgressToggle').classList.remove('has-errors');
     $('#bomProgressList').classList.add('hidden');
-    renderBomList(); renderBomTable(); renderBatchTable(); renderBatchStats();
-    renderInventoryTable(); renderPlanList(); renderPlanning();
-    renderScrapList(); renderConversionTable();
+    renderBomList();
+    renderBomTable();
+    renderBatchTable();
+    renderBatchStats();
+    renderInventoryTable();
+    renderPlanList();
+    renderPlanning();
+    renderScrapList();
+    renderConversionTable();
   });
-
-  bindScrapForm();
 }
 
 /* =========================================================
