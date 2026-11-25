@@ -8714,15 +8714,45 @@ function isProductionBatch(id) {
 }
 
 function parseTransitSheet(rows) {
-  if (!rows || rows.length < 3) return [];
+  if (!rows || rows.length < 2) return [];
 
-  const header = (rows[2] || []).map(h =>
-    String(h || '')
-      .replace(/\u00a0/g, ' ')
-      .replace(/\u200b/g, '')
-      .trim()
-      .toLowerCase()
-  );
+  /* ---- 1. Auto-detect the header row ----
+     Scan the first 10 rows. The header is the row that contains at least
+     3 of our 8 key header names. This tolerates title rows, blank rows,
+     and the header being on line 1, 2, 3, or 4 depending on the export. */
+  const norm = h => String(h || '')
+    .replace(/\u00a0/g, ' ')
+    .replace(/\u200b/g, '')
+    .trim()
+    .toLowerCase();
+
+  const KEY_HEADERS = [
+    'line', 'batch number', 'model name', 'variance',
+    'color', 'cargo', 'qty of containers', 'eta barcelona'
+  ];
+
+  let headerIdx = -1;
+  let bestMatch = 0;
+  const scanLimit = Math.min(rows.length, 10);
+  for (let i = 0; i < scanLimit; i++) {
+    const row = (rows[i] || []).map(norm);
+    let matches = 0;
+    for (const k of KEY_HEADERS) {
+      if (row.some(h => h === k || h.includes(k))) matches++;
+    }
+    if (matches > bestMatch) { bestMatch = matches; headerIdx = i; }
+    if (matches >= 5) { headerIdx = i; break; }   // strong hit — stop scanning
+  }
+
+  if (headerIdx < 0 || bestMatch < 3) {
+    throw new Error(
+      'Transit sheet: could not locate a header row containing "Batch Number" ' +
+      'and other expected columns (Line, Model, Variance, Color, Cargo, Qty of Containers, ETA Barcelona). ' +
+      'First row preview: ' + ((rows[0] || []).slice(0, 12).join(' | '))
+    );
+  }
+
+  const header = (rows[headerIdx] || []).map(norm);
 
   const idx = (names) => {
     for (const n of names) {
@@ -8738,7 +8768,7 @@ function parseTransitSheet(rows) {
 
   const c = {
     line:       idx(['line']),
-    batchId:    idx(['batch number', 'batch']),
+    batchId:    idx(['batch number', 'batch id', 'batch']),
     model:      idx(['model name', 'model']),
     variance:   idx(['variance']),
     color:      idx(['color', 'colour']),
@@ -8748,11 +8778,16 @@ function parseTransitSheet(rows) {
   };
 
   if (c.batchId < 0) {
-    throw new Error('Transit sheet: "Batch Number" column not found in header row (line 3). Found columns: ' + header.join(' | '));
+    throw new Error(
+      'Transit sheet: header row found at line ' + (headerIdx + 1) +
+      ' but "Batch Number" column is missing. ' +
+      'Columns found: ' + header.join(' | ')
+    );
   }
 
+  /* ---- 2. Read data rows below the header ---- */
   const out = [];
-  for (let i = 3; i < rows.length; i++) {
+  for (let i = headerIdx + 1; i < rows.length; i++) {
     const r = rows[i];
     if (!r || !r.length) continue;
     const batchId = String(r[c.batchId] || '').trim();
@@ -8777,7 +8812,6 @@ function parseTransitSheet(rows) {
   }
   return out;
 }
-
 async function handleTransitFiles(files) {
   const f = files[0];
   if (!f) return;
