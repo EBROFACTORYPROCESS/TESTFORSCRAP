@@ -5716,10 +5716,10 @@ const STORED_SLOTS = {
                     tab: 'bomlist',    chipEl: '#fileChip-bomFolder',
                     pickFn: 'pickBomFolder',        reloadFn: 'reloadBomFolderFromHandle' },
   batchFile:      { label: 'Batch / shipment file',     kind: 'file',      mode: 'read',
-                    tab: 'inventory',  chipEl: '#fileChip-batchFile',
+                    tab: 'productionControl',  chipEl: '#fileChip-batchFile-pc',
                     pickFn: 'pickBatchFile',        reloadFn: 'reloadBatchFromHandle' },
   productionFile: { label: 'Production tracking file',  kind: 'file',      mode: 'read',
-                    tab: 'production', chipEl: '#fileChip-productionFile',
+                    tab: 'productionControl', chipEl: '#fileChip-productionFile-pc',
                     pickFn: 'pickProductionFile',   reloadFn: 'reloadProductionFromHandle' },
   exportFolder:   { label: 'XML export folder',         kind: 'directory', mode: 'readwrite',
                     tab: 'production', chipEl: '#fileChip-exportFolder',
@@ -9019,12 +9019,6 @@ function bindProductionControl() {
     pickProductionFile();
   });
 
-  /* Route the two chip containers to existing slots (so renderTabFileChip finds them).
-     The existing STORED_SLOTS entries point at the old chip ids; the new DOM has
-     different ids. We patch the chipEl pointers here. */
-  STORED_SLOTS.batchFile.chipEl      = '#fileChip-batchFile-pc';
-  STORED_SLOTS.productionFile.chipEl = '#fileChip-productionFile-pc';
-
   /* Try to restore any previously stored handles for the transit slot */
   (async () => {
     const { handle, perm } = await getSlotStatus('transitFile');
@@ -9036,7 +9030,452 @@ function bindProductionControl() {
   })();
 }
 
+/* =========================================================
+   PRODUCTION CONTROL — Phase 2B: merged tree + KPI + filters
+   ========================================================= */
 
+/* Collapse state for the merged tree (independent of other tabs) */
+const PC_LINE_COLLAPSED  = new Set();
+const PC_MODEL_COLLAPSED = new Set();
+const PC_COLOR_COLLAPSED = new Set();
+
+/* ---------- Universe + per-batch enrichment ---------- */
+function buildMergedBatches() {
+  const transitMap = new Map();
+  for (const r of STATE.productionControl.transit.records) {
+    if (!isProductionBatch(r.batchId)) continue;
+    transitMap.set(r.batchId, r);
+  }
+
+  const planMap = new Map();
+  for (const b of STATE.batches) planMap.set(b.batch, b);
+
+  const execMap = new Map();
+  for (const [id, pb] of STATE.production.batches) {
+    if (!id || id.startsWith('(no batch)')) continue;
+    if (!isProductionBatch(id)) continue;
+    execMap.set(id, pb);
+  }
+
+  const manualMap = STATE.productionControl.manualRows || {};
+
+  const ids = new Set([
+    ...transitMap.keys(),
+    ...planMap.keys(),
+    ...execMap.keys(),
+    ...Object.keys(manualMap)
+  ]);
+
+  const rows = [];
+  for (const id of ids) {
+    const t  = transitMap.get(id);
+    const p  = planMap.get(id);
+    const e  = execMap.get(id);
+    const m  = manualMap[id];
+    const pe = STATE.productionControl.planEdits[id] || {};
+
+    /* Resolve group fields — first non-empty wins */
+    const line  = t?.line  || p?._line  || m?.line  || dominantLine(e) || '';
+    const model = t?.model || p?.model  || m?.model || dominantField(e?.vins, 'description') || '';
+    const color = t?.color || p?.color  || m?.color || dominantField(e?.vins, 'color') || '';
+    const colorCode =
+      p?.colorCode ||
+      m?.colorCode ||
+      dominantField(e?.vins, 'colorCode') ||
+      '';
+
+    /* Plan fields, with manual / edited overlay */
+    const basePlanDevanning = p?.decanting || m?.planDevanning || null;
+    const basePlanTrimIn    = p?.trimIn    || m?.planTrimIn    || null;
+    const basePlanQty       = p?.qty       || m?.planQty       || 0;
+
+    const planDevanning = pe.devanning ?? (basePlanDevanning ? isoDate(new Date(basePlanDevanning)) : '');
+    const planTrimIn    = pe.trimIn    ?? (basePlanTrimIn    ? isoDate(new Date(basePlanTrimIn))    : '');
+    const planQty       = pe.qty       ?? basePlanQty;
+
+    /* Execution metrics */
+    const actualVins = e ? e.vins.length : 0;
+    let actualOffline = 0;
+    let actualTrimEarliest = null;
+    if (e) {
+      for (const v of e.vins) {
+        if (v.offLine) actualOffline++;
+        if (v.trimIn && (!actualTrimEarliest || v.trimIn < actualTrimEarliest)) {
+          actualTrimEarliest = v.trimIn;
+        }
+      }
+    }
+
+    /* State */
+    let state, stateLabel, stateClass;
+    if (actualOffline > 0 && planQty > 0 && actualOffline >= planQty) {
+      state = 'complete'; stateLabel = 'COMPLETE'; stateClass = 'complete';
+    } else if (actualVins > 0) {
+      state = 'production'; stateLabel = 'IN PRODUCTION'; stateClass = 'production';
+    } else if (p || m) {
+      state = 'planned'; stateLabel = 'PLANNED'; stateClass = 'planned';
+    } else if (t) {
+      state = 'transit'; stateLabel = 'IN TRANSIT'; stateClass = 'transit';
+    } else {
+      state = 'execOnly'; stateLabel = 'EXEC ONLY'; stateClass = 'execOnly';
+    }
+    if (m) stateClass = 'manual';
+    if (m) stateLabel = 'MANUAL';
+
+    rows.push({
+      id, line, model, color, colorCode,
+      variance:   t?.variance || m?.variance || '',
+      cargo:      t?.cargo || '',
+      containers: t?.containers || '',
+      eta:        t?.eta || m?.eta || '',
+      planDevanning, planTrimIn, planQty,
+      basePlanDevanning: basePlanDevanning ? isoDate(new Date(basePlanDevanning)) : '',
+      basePlanTrimIn:    basePlanTrimIn    ? isoDate(new Date(basePlanTrimIn))    : '',
+      basePlanQty,
+      actualVins, actualOffline, actualTrimEarliest,
+      isManual: !!m,
+      editedDevanning: pe.devanning != null,
+      editedTrimIn:    pe.trimIn    != null,
+      editedQty:       pe.qty       != null,
+      hasPlan:  !!(p || m),
+      hasExec:  !!e,
+      hasTransit: !!t,
+      state, stateLabel, stateClass
+    });
+  }
+  return rows;
+}
+
+/* ---------- KPI strip ---------- */
+function renderPcKpi(rows) {
+  const el = $('#pcKpi');
+  if (!el) return;
+  if (!rows.length) {
+    el.innerHTML = '<div class="hint" style="margin:0">Load at least one input file to begin.</div>';
+    return;
+  }
+  const transit  = rows.filter(r => r.state === 'transit').length;
+  const planned  = rows.filter(r => r.state === 'planned').length;
+  const prod     = rows.filter(r => r.state === 'production').length;
+  const complete = rows.filter(r => r.state === 'complete').length;
+
+  const plannedQty  = rows.reduce((s, r) => s + (Number(r.planQty) || 0), 0);
+  const actualVins  = rows.reduce((s, r) => s + r.actualVins, 0);
+  const actualOff   = rows.reduce((s, r) => s + r.actualOffline, 0);
+
+  el.innerHTML = `
+    <div class="kpi-compact">
+      <div class="kpi-bar" style="background:#f59e0b"></div>
+      <div class="kpi-body">
+        <div class="kpi-label">In Transit</div>
+        <div class="kpi-value">${fmt(transit)}<span class="kpi-sub">batches</span></div>
+      </div>
+    </div>
+    <div class="kpi-compact">
+      <div class="kpi-bar" style="background:#8b5cf6"></div>
+      <div class="kpi-body">
+        <div class="kpi-label">Planned</div>
+        <div class="kpi-value">${fmt(planned)}<span class="kpi-sub">batches</span></div>
+      </div>
+    </div>
+    <div class="kpi-compact">
+      <div class="kpi-bar" style="background:#2563eb"></div>
+      <div class="kpi-body">
+        <div class="kpi-label">In Production</div>
+        <div class="kpi-value">${fmt(prod)}<span class="kpi-sub">batches</span></div>
+      </div>
+    </div>
+    <div class="kpi-compact">
+      <div class="kpi-bar" style="background:#10b981"></div>
+      <div class="kpi-body">
+        <div class="kpi-label">Complete</div>
+        <div class="kpi-value">${fmt(complete)}<span class="kpi-sub">batches</span></div>
+      </div>
+    </div>
+    <div class="kpi-compact">
+      <div class="kpi-bar" style="background:#64748b"></div>
+      <div class="kpi-body">
+        <div class="kpi-label">Planned Qty</div>
+        <div class="kpi-value">${fmt(plannedQty)}<span class="kpi-sub">vehicles</span></div>
+      </div>
+    </div>
+    <div class="kpi-compact">
+      <div class="kpi-bar" style="background:#2563eb"></div>
+      <div class="kpi-body">
+        <div class="kpi-label">Actual VINs</div>
+        <div class="kpi-value">${fmt(actualVins)}<span class="kpi-sub">vehicles</span></div>
+      </div>
+    </div>
+    <div class="kpi-compact">
+      <div class="kpi-bar" style="background:#10b981"></div>
+      <div class="kpi-body">
+        <div class="kpi-label">Offline</div>
+        <div class="kpi-value">${fmt(actualOff)}<span class="kpi-sub">vehicles</span></div>
+      </div>
+    </div>
+  `;
+}
+
+/* ---------- Filters ---------- */
+function applyPcFilter(rows, filter, search) {
+  let out = rows;
+
+  if (filter === 'transit')       out = out.filter(r => r.state === 'transit');
+  else if (filter === 'planned')  out = out.filter(r => r.state === 'planned');
+  else if (filter === 'inProduction') out = out.filter(r => r.state === 'production');
+  else if (filter === 'complete') out = out.filter(r => r.state === 'complete');
+  else if (filter === 'execOnly') out = out.filter(r => r.state === 'execOnly');
+  else if (filter === 'manual')   out = out.filter(r => r.isManual);
+
+  if (search) {
+    const q = search.toLowerCase();
+    out = out.filter(r =>
+      `${r.id} ${r.model} ${r.color} ${r.line} ${r.variance}`.toLowerCase().includes(q));
+  }
+  return out;
+}
+
+/* ---------- Tree renderer ---------- */
+function renderPcTree(rows) {
+  const tree = $('#pcTree');
+  if (!tree) return;
+
+  if (!rows.length) {
+    tree.innerHTML = '<div class="hint" style="margin:16px 0 0">No batches match the current filters.</div>';
+    return;
+  }
+
+  /* Group: line → model → colour → rows */
+  const lineMap = new Map();
+  for (const r of rows) {
+    const line  = r.line  || '(no line)';
+    const model = r.model || '(no model)';
+    const color = r.color || '(no colour)';
+    const cc    = r.colorCode || '';
+
+    if (!lineMap.has(line)) lineMap.set(line, new Map());
+    const modelMap = lineMap.get(line);
+    if (!modelMap.has(model)) modelMap.set(model, new Map());
+    const colorMap = modelMap.get(model);
+    const ckey = color + '||' + cc;
+    if (!colorMap.has(ckey)) colorMap.set(ckey, { color, colorCode: cc, rows: [] });
+    colorMap.get(ckey).rows.push(r);
+  }
+
+  const sortedLines = Array.from(lineMap.entries())
+    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+  /* Column layout — locked in phase 2B, editable in 3 */
+  const COLS = [
+    { id: 'batch',       label: 'Batch',         cls: 'mono' },
+    { id: 'state',       label: 'State',         cls: '' },
+    { id: 'line',        label: 'Line',          cls: '' },
+    { id: 'model',       label: 'Model',         cls: '' },
+    { id: 'variance',    label: 'Variance',      cls: '' },
+    { id: 'color',       label: 'Colour',        cls: '' },
+    { id: 'eta',         label: 'ETA',           cls: '' },
+    { id: 'planDevan',   label: 'Plan Devan.',   cls: '' },
+    { id: 'planTrim',    label: 'Plan Trim-in',  cls: '' },
+    { id: 'planQty',     label: 'Plan Qty',      cls: 'num' },
+    { id: 'actualVins',  label: 'VINs',          cls: 'num' },
+    { id: 'actualOff',   label: 'Offline',       cls: 'num' },
+    { id: 'actualTrim',  label: 'Actual Trim-in',cls: '' }
+  ];
+
+  let html = '';
+  for (const [line, modelMap] of sortedLines) {
+    const lineRows = [];
+    for (const cm of modelMap.values())
+      for (const cg of cm.values())
+        lineRows.push(...cg.rows);
+
+    const linePlanned = lineRows.reduce((s, r) => s + (Number(r.planQty) || 0), 0);
+    const lineActual  = lineRows.reduce((s, r) => s + r.actualOffline, 0);
+    const lineOpen    = !PC_LINE_COLLAPSED.has(line);
+
+    html += `<details class="prod-line-group" data-line="${escapeHtml(line)}" ${lineOpen ? 'open' : ''}>
+      <summary class="prod-line-header">
+        <span class="line-name">${escapeHtml(line)}</span>
+        <span class="line-count">
+          ${modelMap.size} model${modelMap.size === 1 ? '' : 's'} ·
+          ${lineRows.length} batch${lineRows.length === 1 ? '' : 'es'} ·
+          <b>${fmt(linePlanned)}</b> planned ·
+          <b>${fmt(lineActual)}</b> offline
+        </span>
+      </summary>
+      <div class="prod-spec-list">`;
+
+    const sortedModels = Array.from(modelMap.entries())
+      .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+    for (const [model, colorMap] of sortedModels) {
+      const modelRows = [];
+      for (const cg of colorMap.values()) modelRows.push(...cg.rows);
+      const modelPlanned = modelRows.reduce((s, r) => s + (Number(r.planQty) || 0), 0);
+      const modelOpen    = !PC_MODEL_COLLAPSED.has(line + '||' + model);
+
+      html += `<details class="prod-spec-group" data-line="${escapeHtml(line)}" data-model="${escapeHtml(model)}" ${modelOpen ? 'open' : ''}>
+        <summary class="prod-spec-header">
+          <span class="spec-name">${escapeHtml(model)}</span>
+          <span class="spec-count">
+            ${modelRows.length} batch${modelRows.length === 1 ? '' : 'es'} ·
+            ${colorMap.size} colour${colorMap.size === 1 ? '' : 's'} ·
+            <b>${fmt(modelPlanned)}</b> planned
+          </span>
+        </summary>
+        <div class="prod-color-list">`;
+
+      const sortedColors = Array.from(colorMap.entries())
+        .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }));
+
+      for (const [ckey, cg] of sortedColors) {
+        const colorPlanned = cg.rows.reduce((s, r) => s + (Number(r.planQty) || 0), 0);
+        const colorOpen    = !PC_COLOR_COLLAPSED.has(line + '||' + model + '||' + ckey);
+
+        html += `<details class="prod-color-group" data-line="${escapeHtml(line)}" data-model="${escapeHtml(model)}" data-color="${escapeHtml(ckey)}" ${colorOpen ? 'open' : ''}>
+          <summary class="prod-color-header">
+            <span class="color-code" style="${colorBadgeStyle(cg.colorCode)}">${escapeHtml(cg.colorCode || '??')}</span>
+            <span class="color-name">${escapeHtml(model)} ${escapeHtml(cg.color)}</span>
+            <span class="color-count">
+              ${cg.rows.length} batch${cg.rows.length === 1 ? '' : 'es'} ·
+              <b>${fmt(colorPlanned)}</b> planned
+            </span>
+          </summary>
+          <div class="prod-batch-list">
+            <table class="pc-batch-table">
+              <thead><tr>
+                ${COLS.map(c => `<th class="${c.cls === 'num' ? 'num' : ''}">${escapeHtml(c.label)}</th>`).join('')}
+              </tr></thead>
+              <tbody>`;
+
+        const sortedRows = cg.rows.slice().sort((a, b) =>
+          a.id.localeCompare(b.id, undefined, { numeric: true }));
+
+        for (const r of sortedRows) {
+          const rowClass = 'pc-batch-row' + (r.isManual ? ' manual' : '');
+          const offlineCell = r.actualVins > 0
+            ? `<span class="pc-offline"><b>${fmt(r.actualOffline)}</b><small>/${fmt(Number(r.planQty) || 0)}</small></span>`
+            : `<span class="pc-offline empty">—</span>`;
+          const actualTrimCell = r.actualTrimEarliest
+            ? fmtDate(new Date(r.actualTrimEarliest))
+            : '—';
+
+          html += `<tr class="${rowClass}" data-batch="${escapeHtml(r.id)}">
+            <td class="mono">${escapeHtml(r.id)}</td>
+            <td><span class="pc-state ${r.stateClass}">${escapeHtml(r.stateLabel)}</span></td>
+            <td>${escapeHtml(r.line || '—')}</td>
+            <td>${escapeHtml(r.model || '—')}</td>
+            <td>${escapeHtml(r.variance || '—')}</td>
+            <td>${escapeHtml(r.color || '—')}</td>
+            <td>${r.eta ? fmtDate(new Date(r.eta + 'T00:00:00')) : '—'}</td>
+            <td>${r.planDevanning ? fmtDate(new Date(r.planDevanning + 'T00:00:00')) : '—'}</td>
+            <td>${r.planTrimIn    ? fmtDate(new Date(r.planTrimIn    + 'T00:00:00')) : '—'}</td>
+            <td class="num">${fmt(Number(r.planQty) || 0)}</td>
+            <td class="num">${fmt(r.actualVins)}</td>
+            <td class="num">${offlineCell}</td>
+            <td>${actualTrimCell}</td>
+          </tr>`;
+        }
+
+        html += `</tbody></table></div></details>`;
+      }
+      html += `</div></details>`;
+    }
+    html += `</div></details>`;
+  }
+
+  tree.innerHTML = html;
+
+  /* Persist collapse state */
+  tree.querySelectorAll('details.prod-line-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const k = d.dataset.line;
+      if (d.open) PC_LINE_COLLAPSED.delete(k); else PC_LINE_COLLAPSED.add(k);
+    });
+  });
+  tree.querySelectorAll('details.prod-spec-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const k = d.dataset.line + '||' + d.dataset.model;
+      if (d.open) PC_MODEL_COLLAPSED.delete(k); else PC_MODEL_COLLAPSED.add(k);
+    });
+  });
+  tree.querySelectorAll('details.prod-color-group').forEach(d => {
+    d.addEventListener('toggle', () => {
+      const k = d.dataset.line + '||' + d.dataset.model + '||' + d.dataset.color;
+      if (d.open) PC_COLOR_COLLAPSED.delete(k); else PC_COLOR_COLLAPSED.add(k);
+    });
+  });
+}
+
+/* ---------- Main entry ---------- */
+function renderProductionControl() {
+  const allRows = buildMergedBatches();
+
+  const filter = $('#pcFilter')?.value || 'all';
+  const search = ($('#pcSearch')?.value || '').trim();
+  const filtered = applyPcFilter(allRows, filter, search);
+
+  renderPcKpi(allRows);
+  renderPcTree(filtered);
+  renderPcTransitPreview();       // (from Patch 2A)
+  pcUpdateEditCount();
+}
+
+function pcUpdateEditCount() {
+  const el = $('#pcEditCount');
+  if (!el) return;
+  const edits  = Object.keys(STATE.productionControl.planEdits || {}).length;
+  const manual = Object.keys(STATE.productionControl.manualRows || {}).length;
+  if (!edits && !manual) { el.textContent = ''; return; }
+  const parts = [];
+  if (edits)  parts.push(`${edits} edit${edits === 1 ? '' : 's'}`);
+  if (manual) parts.push(`${manual} manual`);
+  el.textContent = '· ' + parts.join(' · ');
+  const saveBtn = $('#pcSavePlan');
+  if (saveBtn) saveBtn.disabled = false;
+}
+
+/* ---------- Filters / expand / collapse binding ---------- */
+function bindPcFilters() {
+  $('#pcSearch')?.addEventListener('input', () => {
+    STATE.productionControl.view.search = $('#pcSearch').value;
+    renderProductionControl();
+  });
+  $('#pcFilter')?.addEventListener('change', () => {
+    STATE.productionControl.view.filter = $('#pcFilter').value;
+    renderProductionControl();
+  });
+  $('#pcExpandAll')?.addEventListener('click', () => {
+    PC_LINE_COLLAPSED.clear();
+    PC_MODEL_COLLAPSED.clear();
+    PC_COLOR_COLLAPSED.clear();
+    renderProductionControl();
+  });
+  $('#pcCollapseAll')?.addEventListener('click', () => {
+    const rows = buildMergedBatches();
+    for (const r of rows) {
+      const line  = r.line  || '(no line)';
+      const model = r.model || '(no model)';
+      const color = r.color || '(no colour)';
+      const cc    = r.colorCode || '';
+      PC_LINE_COLLAPSED.add(line);
+      PC_MODEL_COLLAPSED.add(line + '||' + model);
+      PC_COLOR_COLLAPSED.add(line + '||' + model + '||' + color + '||' + cc);
+    }
+    renderProductionControl();
+  });
+}
+
+/* ---------- Hook into existing bindProductionControl ---------- */
+const _origBindPC = bindProductionControl;
+bindProductionControl = function() {
+  _origBindPC.apply(this, arguments);
+  bindPcFilters();
+  renderProductionControl();
+};
+
+/* ---------- Also re-render whenever the plan or exec file is loaded ---------- */
+/* (The handleBatchFiles / handleProductionFiles hooks were added above.) */
 
 
 window.MRP = STATE;
