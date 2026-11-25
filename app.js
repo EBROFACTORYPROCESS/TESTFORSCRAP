@@ -1892,7 +1892,7 @@ function renderBatchStats() {
     factoryFloor: 'Decanting Date already passed',
     edgeLine:     'Manual stage',
     consumed:     'TRIM IN DATE in the past and Production = DONE'
-  };
+  }
   function breakdownHtml(byModel) {
     const entries = Object.entries(byModel || {}).sort((a,b) => b[1].qty - a[1].qty);
     if (!entries.length) return '';
