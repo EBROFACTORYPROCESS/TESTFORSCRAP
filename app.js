@@ -790,7 +790,7 @@ async function processBomFolder() {
     populateStockBomSelect();
     renderStockFeasibility();
   }
-   
+  renderProductionControl();  
 }
 function bindFolderFallback() {
   const inp = $('#bomFolderFallback');
@@ -1830,9 +1830,6 @@ function getUniqueValues(colId) {
    BATCH STATS
    ========================================================= */
 function renderBatchStats() {
-  const stages = STATE.config.stages;
-  const agg = {};
-  /* ---- Line chips ---- */
   const chips = $('#batchLineChips');
   if (chips) {
     const lineAgg = new Map();
@@ -1868,7 +1865,16 @@ function renderBatchStats() {
         renderBatchTable();
       });
     });
-  }   
+  }
+
+  /* The stat cards container is gone — skip if absent, but still compute
+     is not necessary since nothing consumes them anymore. */
+  const statsEl = $('#batchStats');
+  if (!statsEl) return;
+
+  /* original stats rendering continues as before, guarded by early-return */
+  const stages = STATE.config.stages;
+  const agg = {};
   for (const b of STATE.batches) {
     if (!agg[b._stage]) agg[b._stage] = { count: 0, qty: 0, byModel: {} };
     agg[b._stage].count += 1;
@@ -1880,7 +1886,6 @@ function renderBatchStats() {
   }
   const totalCount = STATE.batches.length;
   const totalQty   = STATE.batches.reduce((a,b) => a + (b.qty||0), 0);
-
   const rules = {
     inTransit:    'Arrival Date is in the future',
     warehouse:    'Arrived, not yet decanted',
@@ -1888,6 +1893,37 @@ function renderBatchStats() {
     edgeLine:     'Manual stage',
     consumed:     'TRIM IN DATE in the past and Production = DONE'
   };
+  function breakdownHtml(byModel) {
+    const entries = Object.entries(byModel || {}).sort((a,b) => b[1].qty - a[1].qty);
+    if (!entries.length) return '';
+    return `<div class="byModel">${entries.map(([m, v]) => `
+      <div class="byModel-row">
+        <span class="m-name" title="${escapeHtml(m)}">${escapeHtml(shorten(m, 22))}</span>
+        <span class="m-val">${fmt(v.qty)} <small>v · ${v.count} b</small></span>
+      </div>`).join('')}</div>`;
+  }
+  statsEl.innerHTML = `
+    <div class="stat">
+      <div class="label">All batches</div>
+      <div class="value">${fmt(totalQty)}<span class="unit">vehicles</span></div>
+      <div class="sub"><b>${fmt(totalCount)}</b> batches total</div>
+    </div>
+    ${Object.entries(stages).map(([k, s]) => {
+      const a = agg[k] || { count:0, qty:0, byModel:{} };
+      return `<div class="stat" title="${escapeHtml(rules[k]||'')}">
+        <div class="label"><span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span></div>
+        <div class="value">${fmt(a.qty)}<span class="unit">vehicles</span></div>
+        <div class="sub"><b>${fmt(a.count)}</b> batches</div>
+        ${breakdownHtml(a.byModel)}
+      </div>`;
+    }).join('')}
+    <div class="stat" title="Could not be classified automatically — missing dates">
+      <div class="label">Unassigned</div>
+      <div class="value">${fmt((agg.unassigned||{}).qty||0)}<span class="unit">vehicles</span></div>
+      <div class="sub"><b>${fmt((agg.unassigned||{}).count||0)}</b> batches</div>
+      ${breakdownHtml((agg.unassigned||{}).byModel)}
+    </div>`;
+}
 
   function breakdownHtml(byModel) {
     const entries = Object.entries(byModel || {})
@@ -1935,6 +1971,7 @@ function renderBatchStats() {
    ========================================================= */
 function renderBatchTable() {
   const tree = $('#batchTable');
+  if (!tree) return;                              // ← guard
   if (!STATE.batches.length) {
     tree.innerHTML = '<div class="hint" style="margin:0">No batch data</div>';
     return;
@@ -2556,6 +2593,7 @@ function computeInventory() {
 
 function renderInventoryTable() {
   const tbl = $('#invTable');
+  if (!tbl) return;  
   const q = ($('#invSearch').value || '').toLowerCase();
   const whEnabled = STATE.config.warehouses.filter(w => w.enabled);
   const scrapMap = scrapByPartNo();
@@ -3578,7 +3616,7 @@ async function handleProductionFiles(files) {
     renderAllProductionViews();
     updateProductionPeriodHint();
     updateApplyButtonState();
-
+    renderProductionControl(); 
     setTimeout(() => wrap.classList.add('hidden'), 3000);
   } catch (e) {
     console.error(e);
@@ -3625,6 +3663,7 @@ function clearProduction() {
   renderAllProductionViews();
   updateProductionPeriodHint();
   updateApplyButtonState();
+  renderProductionControl();
 }
 /* =========================================================
    MONITORING PERIOD
