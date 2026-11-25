@@ -366,6 +366,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   bindUploads();
   bindButtons();
   bindProduction();
+  bindProductionControl();   
   bindStoredFilesTab();
   bindPersistentFileSlots();
   bindComparison();
@@ -8683,4 +8684,282 @@ async function reloadScrapImageFolderFromHandle(handle) {
   STATE.scrapAnalysis.imageFolderHandle = handle;
   renderScrapAnalysis(); // Re-render so links turn blue
 }
+/* =========================================================
+   PRODUCTION CONTROL — Phase 2A: transit file
+   ========================================================= */
+
+STATE.productionControl = {
+  transit: {
+    records: [],
+    sheets: [],
+    lastFile: null,
+    fileName: '',
+    loaded: false
+  },
+  planEdits: {},
+  manualRows: {},
+  view: {
+    search: '',
+    filter: 'all',
+    collapsed: { lines: new Set(), models: new Set(), colors: new Set() }
+  },
+  daily: { period: 'all', line: '' }
+};
+
+function isProductionBatch(id) {
+  return /^(2860-DT|2860-ST|2860-CT)/i.test(String(id || '').trim());
+}
+
+function parseTransitSheet(rows) {
+  if (!rows || rows.length < 3) return [];
+
+  const header = (rows[2] || []).map(h =>
+    String(h || '')
+      .replace(/\u00a0/g, ' ')
+      .replace(/\u200b/g, '')
+      .trim()
+      .toLowerCase()
+  );
+
+  const idx = (names) => {
+    for (const n of names) {
+      const i = header.findIndex(h => h === n);
+      if (i >= 0) return i;
+    }
+    for (const n of names) {
+      const i = header.findIndex(h => h.includes(n));
+      if (i >= 0) return i;
+    }
+    return -1;
+  };
+
+  const c = {
+    line:       idx(['line']),
+    batchId:    idx(['batch number', 'batch']),
+    model:      idx(['model name', 'model']),
+    variance:   idx(['variance']),
+    color:      idx(['color', 'colour']),
+    cargo:      idx(['cargo']),
+    containers: idx(['qty of containers', 'containers', 'container']),
+    eta:        idx(['eta barcelona', 'eta'])
+  };
+
+  if (c.batchId < 0) {
+    throw new Error('Transit sheet: "Batch Number" column not found in header row (line 3). Found columns: ' + header.join(' | '));
+  }
+
+  const out = [];
+  for (let i = 3; i < rows.length; i++) {
+    const r = rows[i];
+    if (!r || !r.length) continue;
+    const batchId = String(r[c.batchId] || '').trim();
+    if (!batchId) continue;
+
+    let eta = '';
+    if (c.eta >= 0) {
+      const d = parseDate(r[c.eta]);
+      if (d) eta = isoDate(d);
+    }
+
+    out.push({
+      line:       c.line       >= 0 ? String(r[c.line]       || '').trim() : '',
+      batchId,
+      model:      c.model      >= 0 ? String(r[c.model]      || '').trim() : '',
+      variance:   c.variance   >= 0 ? String(r[c.variance]   || '').trim() : '',
+      color:      c.color      >= 0 ? String(r[c.color]      || '').trim() : '',
+      cargo:      c.cargo      >= 0 ? String(r[c.cargo]      || '').trim() : '',
+      containers: c.containers >= 0 ? String(r[c.containers] || '').trim() : '',
+      eta
+    });
+  }
+  return out;
+}
+
+async function handleTransitFiles(files) {
+  const f = files[0];
+  if (!f) return;
+  try {
+    const sheets = await fileToSheetRows(f);
+    if (!sheets.length) throw new Error('No sheets in file.');
+
+    const picked = await promptSheetSelection(sheets, f.name);
+    if (!picked || !picked.length) return;
+
+    const sheet = picked[0];
+    const records = parseTransitSheet(sheet.rows);
+    if (!records.length) {
+      alert('No valid transit rows found in the selected sheet.');
+      return;
+    }
+
+    STATE.productionControl.transit.records  = records;
+    STATE.productionControl.transit.sheets   = sheets;
+    STATE.productionControl.transit.lastFile = f;
+    STATE.productionControl.transit.fileName = f.name + ' :: ' + sheet.name;
+    STATE.productionControl.transit.loaded   = true;
+
+    const p = $('#pcTransitPath'); if (p) p.value = STATE.productionControl.transit.fileName;
+    const btn = $('#pcTransitRepickSheet'); if (btn) btn.disabled = false;
+
+    renderPcTransitPreview();
+    renderAllFileChips();
+    renderStoredFilesTab();
+  } catch (e) {
+    console.error(e);
+    alert('Failed to parse transit file: ' + e.message);
+  }
+}
+
+async function repickTransitSheet() {
+  const sheets = STATE.productionControl.transit.sheets;
+  const f      = STATE.productionControl.transit.lastFile;
+  if (!sheets || !sheets.length || !f) return;
+
+  const picked = await promptSheetSelection(sheets, f.name);
+  if (!picked || !picked.length) return;
+  const sheet = picked[0];
+  const records = parseTransitSheet(sheet.rows);
+  if (!records.length) { alert('No valid transit rows in that sheet.'); return; }
+
+  STATE.productionControl.transit.records  = records;
+  STATE.productionControl.transit.fileName = f.name + ' :: ' + sheet.name;
+  const p = $('#pcTransitPath'); if (p) p.value = STATE.productionControl.transit.fileName;
+  renderPcTransitPreview();
+}
+
+async function pickTransitFile() {
+  if (typeof window.showOpenFilePicker !== 'function') {
+    const inp = document.createElement('input');
+    inp.type = 'file';
+    inp.accept = '.xlsx,.xls';
+    inp.addEventListener('change', e => {
+      const f = e.target.files?.[0];
+      if (f) handleTransitFiles([f]);
+    });
+    inp.click();
+    return;
+  }
+  try {
+    const [handle] = await window.showOpenFilePicker({
+      types: [{
+        description: 'In-transit batch list',
+        accept: {
+          'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+          'application/vnd.ms-excel': ['.xls']
+        }
+      }]
+    });
+    await saveFileHandle('transitFile', handle);
+    await reloadTransitFromHandle(handle);
+    renderAllFileChips();
+    renderStoredFilesTab();
+  } catch (e) {
+    if (e.name !== 'AbortError') { console.error(e); alert('Failed to pick file: ' + e.message); }
+  }
+}
+
+async function reloadTransitFromHandle(handle) {
+  if (!handle) return;
+  let perm = await handle.queryPermission({ mode: 'read' });
+  if (perm !== 'granted') perm = await handle.requestPermission({ mode: 'read' });
+  if (perm !== 'granted') return;
+  const f = await handle.getFile();
+  await handleTransitFiles([f]);
+}
+
+/* Register transit slot in Stored Files */
+STORED_SLOTS.transitFile = {
+  label:    'In-transit batch file',
+  kind:     'file',
+  mode:     'read',
+  tab:      'productionControl',
+  chipEl:   '#fileChip-transitFile',
+  pickFn:   'pickTransitFile',
+  reloadFn: 'reloadTransitFromHandle'
+};
+
+/* ---------- Raw preview (visible confirmation the parser works) ---------- */
+function renderPcTransitPreview() {
+  const wrap = $('#pcOtherBatchesWrap');
+  const sum  = $('#pcOtherBatchesSummary');
+  const list = $('#pcOtherBatchesList');
+  if (!wrap || !sum || !list) return;
+
+  const all = STATE.productionControl.transit.records;
+  if (!all.length) { wrap.classList.add('hidden'); return; }
+
+  const production = all.filter(r => isProductionBatch(r.batchId));
+  const other      = all.filter(r => !isProductionBatch(r.batchId));
+
+  sum.textContent = `Transit file — ${production.length} production batches, ${other.length} other batches`;
+
+  /* Show BOTH lists under the summary: production first (green), other second (muted) */
+  list.innerHTML = `
+    <div style="margin-bottom:10px">
+      <div style="font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin-bottom:4px">
+        Production batches (${production.length})
+      </div>
+      ${production.length
+        ? production.map(r => `
+            <div class="pc-other-row">
+              <b>${escapeHtml(r.batchId)}</b>
+              <span>${escapeHtml(r.line || '—')}</span>
+              <span>${escapeHtml(r.model || '—')}</span>
+              <span>${escapeHtml(r.color || '—')}</span>
+              <span>ETA ${r.eta ? fmtDate(new Date(r.eta + 'T00:00:00')) : '—'}</span>
+            </div>`).join('')
+        : '<div class="pc-other-row" style="color:var(--muted)">No production batches found.</div>'}
+    </div>
+    ${other.length ? `
+      <div>
+        <div style="font-size:11.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;font-weight:600;margin-bottom:4px">
+          Other batches — ignored for now (${other.length})
+        </div>
+        ${other.map(r => `
+          <div class="pc-other-row">
+            <b>${escapeHtml(r.batchId)}</b>
+            <span>${escapeHtml(r.model || '—')}</span>
+            <span>ETA ${r.eta ? fmtDate(new Date(r.eta + 'T00:00:00')) : '—'}</span>
+          </div>`).join('')}
+      </div>` : ''}
+  `;
+  wrap.classList.remove('hidden');
+  wrap.open = false;
+}
+
+/* ---------- Binding ---------- */
+function bindProductionControl() {
+  $('#pcTransitPick')?.addEventListener('click', pickTransitFile);
+  $('#pcTransitRepickSheet')?.addEventListener('click', repickTransitSheet);
+
+  /* Plan + exec pickers reuse existing functions, but their chip elements are new */
+  $('#pcPlanPick')?.addEventListener('click', () => {
+    if (typeof window.showOpenFilePicker !== 'function') { $('#batchInput')?.click(); return; }
+    pickBatchFile();
+  });
+  $('#pcExecPick')?.addEventListener('click', () => {
+    if (typeof window.showOpenFilePicker !== 'function') { $('#prodInput')?.click(); return; }
+    pickProductionFile();
+  });
+
+  /* Route the two chip containers to existing slots (so renderTabFileChip finds them).
+     The existing STORED_SLOTS entries point at the old chip ids; the new DOM has
+     different ids. We patch the chipEl pointers here. */
+  STORED_SLOTS.batchFile.chipEl      = '#fileChip-batchFile-pc';
+  STORED_SLOTS.productionFile.chipEl = '#fileChip-productionFile-pc';
+
+  /* Try to restore any previously stored handles for the transit slot */
+  (async () => {
+    const { handle, perm } = await getSlotStatus('transitFile');
+    if (handle && perm === 'granted') {
+      try { await reloadTransitFromHandle(handle); } catch (e) { console.error(e); }
+    }
+    /* Also update chip labels on the new ids */
+    renderAllFileChips();
+  })();
+}
+
+
+
+
 window.MRP = STATE;
