@@ -8710,7 +8710,8 @@ STATE.productionControl = {
 };
 
 function isProductionBatch(id) {
-  return /^(2860-DT|2860-ST|2860-CT)/i.test(String(id || '').trim());
+  const s = String(id || '').trim().toUpperCase();
+  return /-(ST|DT|CT)[\dA-Z]/i.test(s);
 }
 
 function parseTransitSheet(rows) {
