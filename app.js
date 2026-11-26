@@ -1543,7 +1543,7 @@ async function handleBatchFiles(files) {
     STATE.batches = Array.from(seen.values());
     const lineSel = $('#batchLineFilter');
     if (lineSel) lineSel.value = '';
-    populateBatchLineFilter();
+    if (typeof populateBatchLineFilter === 'function') populateBatchLineFilter();
 
     STATE.batchView = { sorts: {}, filters: {} };
     
@@ -2691,16 +2691,20 @@ function bindButtons() {
     try { localStorage.removeItem(LS_CONFIG); } catch(e){}
     _bomFolderHandle = null;
     _bomFolderFiles  = [];
-    $('#bomFolderPath').value = '';
-    $('#bomFolderInfo').textContent = 'No folder selected yet.';
-    $('#bomFolderProcess').disabled = true;
-    $('#bomProgressWrap').classList.add('hidden');
-    $('#bomListSearch').value = '';
-    $('#bomListSearchResult').classList.add('hidden');
-    $('#bomListSearchResult').innerHTML = '';
-    $('#bomProgressToggle').classList.add('hidden');
-    $('#bomProgressToggle').classList.remove('has-errors');
-    $('#bomProgressList').classList.add('hidden');
+    if ($('#bomFolderPath')) $('#bomFolderPath').value = '';
+    if ($('#bomFolderInfo')) $('#bomFolderInfo').textContent = 'No folder selected yet.';
+    if ($('#bomFolderProcess')) $('#bomFolderProcess').disabled = true;
+    if ($('#bomProgressWrap')) $('#bomProgressWrap').classList.add('hidden');
+    if ($('#bomListSearch')) $('#bomListSearch').value = '';
+    if ($('#bomListSearchResult')) {
+      $('#bomListSearchResult').classList.add('hidden');
+      $('#bomListSearchResult').innerHTML = '';
+    }
+    if ($('#bomProgressToggle')) {
+      $('#bomProgressToggle').classList.add('hidden');
+      $('#bomProgressToggle').classList.remove('has-errors');
+    }
+    if ($('#bomProgressList')) $('#bomProgressList').classList.add('hidden');
     renderBomList();
     renderBomTable();
     renderBatchTable();
