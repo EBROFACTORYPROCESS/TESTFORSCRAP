@@ -3514,9 +3514,9 @@ async function handleProductionFiles(files) {
   const f = files[0];
   if (!f) return;
 
-  const wrap  = $('#prodProgressWrap');
-  const fill  = $('#prodProgressFill');
-  const label = $('#prodProgressLabel');
+  const wrap  = $('#pcXmlProgressWrap');      // Route to new tab
+  const fill  = $('#pcXmlProgressFill');      // Route to new tab
+  const label = $('#pcXmlProgressLabel');     // Route to new tab
   wrap.classList.remove('hidden');
   fill.style.width = '0%';
   label.textContent = `Reading ${f.name} (${fmt(f.size / 1048576)} MB)…`;
@@ -3625,7 +3625,8 @@ function clearProduction() {
   const modelValues = $('#prodModelValues'); if (modelValues) modelValues.innerHTML = '';
   syncMultiselectUI();
 
-  $('#prodProgressWrap').classList.add('hidden');
+  const pw = $('#pcXmlProgressWrap');
+  if (pw) pw.classList.add('hidden');
   renderAllProductionViews();
   updateProductionPeriodHint();
   updateApplyButtonState();
@@ -4798,7 +4799,7 @@ async function exportProductionXml() {
   const label  = $('#xmlProgressLabel');
   const errBox = $('#xmlErrorLog');
 
-  wrap.classList.remove('hidden');
+  if (wrap) wrap.classList.remove('hidden');
   errBox.classList.add('hidden');
   errBox.innerHTML = '';
   fill.style.width = '0%';
@@ -4945,7 +4946,9 @@ async function exportProductionXml() {
     (_lastXmlErrors.length ? 'Please check the error log for details.' : '')
   );
 
-  setTimeout(() => wrap.classList.add('hidden'), 3000);
+      setTimeout(() => {
+      if (wrap) wrap.classList.add('hidden');
+    }, 3000);
 }
 
 function exportXmlErrors() {
