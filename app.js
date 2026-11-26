@@ -4033,7 +4033,7 @@ function renderProductionChart() {
     return;
   }
 
-  const granularity = $('#prodChartGranularity').value;
+  const granularity = $('#pcChartGranularity').value;
   const stageKey    = $('#prodChartStage').value;
 
 
@@ -4482,9 +4482,9 @@ function renderProductionVinTable() {
   const tbl = $('#pcVinTable');
   const pg  = $('#pcVinPagination');
   if (!STATE.production.loaded) {
-    tbl.innerHTML = `<thead><tr><th>No production data loaded</th></tr></thead>`;
-    pg.innerHTML = '';
-    $('#prodVinCount').textContent = '';
+    if (tbl) tbl.innerHTML = `<thead><tr><th>No production data loaded</th></tr></thead>`;
+    if (pg) pg.innerHTML = '';
+    if ($('#pcVinCount')) $('#pcVinCount').textContent = '';
     return;
   }
   const v = STATE.production.vinView;
@@ -9350,6 +9350,7 @@ function renderProductionControl() {
   renderPcKpi(allRows);
   renderPcTree(filtered);
   renderPcTransitPreview();       // (from Patch 2A)
+  renderPcLineDaily(); 
   pcUpdateEditCount();
 }
 
@@ -9396,6 +9397,19 @@ function bindPcFilters() {
     }
     renderProductionControl();
   });
+     $$('#pcPeriodControls .pc-period-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      STATE.productionControl.daily.period = btn.dataset.range;
+      $$('#pcPeriodControls .pc-period-btn').forEach(b => b.classList.remove('primary'));
+      btn.classList.add('primary');
+      renderPcLineDaily();
+    });
+  });
+
+  $('#pcLineSelect')?.addEventListener('change', e => {
+    STATE.productionControl.daily.line = e.target.value;
+    renderPcLineDaily();
+  });
 }
 
 /* ---------- Hook into existing bindProductionControl ---------- */
@@ -9403,11 +9417,118 @@ const _origBindPC = bindProductionControl;
 bindProductionControl = function() {
   _origBindPC.apply(this, arguments);
   bindPcFilters();
-  renderProductionControl();
+  );
 };
 
 /* ---------- Also re-render whenever the plan or exec file is loaded ---------- */
 /* (The handleBatchFiles / handleProductionFiles hooks were added above.) */
+/* =========================================================
+   PRODUCTION CONTROL — Daily View Chart
+   ========================================================= */
+function renderPcLineDaily() {
+  const canvas = $('#pcLineChart');
+  const empty = $('#pcLineChartEmpty');
+  if (!canvas) return;
 
+  const allRows = buildMergedBatches();
+  const period = STATE.productionControl.daily.period;
+  const lineFilter = STATE.productionControl.daily.line;
+
+  let rows = allRows;
+  if (lineFilter) rows = rows.filter(r => (r.line || '(no line)') === lineFilter);
+
+  const byDate = new Map();
+  const periodBounds = getPeriodRange(period);
+  const from = periodBounds.from;
+  const to   = periodBounds.to;
+
+  for (const r of rows) {
+    const plannedDate = r.planTrimIn;
+    const actualDate  = r.actualTrimEarliest ? String(r.actualTrimEarliest).slice(0, 10) : null;
+    
+    if (plannedDate && (!from || plannedDate >= from) && (!to || plannedDate <= to)) {
+      if (!byDate.has(plannedDate)) byDate.set(plannedDate, { plan: 0, actual: 0 });
+      byDate.get(plannedDate).plan += Number(r.planQty) || 0;
+    }
+    
+    if (actualDate && (!from || actualDate >= from) && (!to || actualDate <= to)) {
+      if (!byDate.has(actualDate)) byDate.set(actualDate, { plan: 0, actual: 0 });
+      byDate.get(actualDate).actual += r.actualOffline || 0;
+    }
+  }
+
+  if (!byDate.size) {
+    canvas.style.display = 'none';
+    if (empty) { empty.style.display = ''; empty.textContent = 'No data to plot for this period.'; }
+    return;
+  }
+
+  canvas.style.display = '';
+  if (empty) empty.style.display = 'none';
+
+  const entries = Array.from(byDate.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+  const dpr  = window.devicePixelRatio || 1;
+  const cssW = Math.max(320, canvas.parentElement.clientWidth - 16);
+  const cssH = 200;
+  canvas.width  = cssW * dpr;
+  canvas.height = cssH * dpr;
+  canvas.style.width  = cssW + 'px';
+  canvas.style.height = cssH + 'px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, cssW, cssH);
+
+  const padLeft = 48, padRight = 14, padTop = 14, padBottom = 52;
+  const plotW = cssW - padLeft - padRight;
+  const plotH = cssH - padTop - padBottom;
+
+  const maxVal  = Math.max(...entries.map(e => Math.max(e[1].plan, e[1].actual)));
+  const niceMax = niceCeil(maxVal);
+  const slot    = plotW / entries.length;
+  const barW    = Math.max(4, (slot - 4) / 2);
+
+  // grid
+  ctx.strokeStyle = '#e5e7eb';
+  ctx.fillStyle = '#94a3b8';
+  ctx.font = '10px system-ui, sans-serif';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i <= 4; i++) {
+    const v = (niceMax / 4) * i;
+    const y = padTop + plotH - (v / niceMax) * plotH;
+    ctx.beginPath(); ctx.moveTo(padLeft, y + 0.5); ctx.lineTo(padLeft + plotW, y + 0.5); ctx.stroke();
+    ctx.fillText(fmt(Math.round(v)), padLeft - 6, y);
+  }
+
+  // bars
+  entries.forEach(([, v], i) => {
+    const x = padLeft + i * slot + 2;
+    const hPlan = (v.plan / niceMax) * plotH;
+    const hAct  = (v.actual / niceMax) * plotH;
+    ctx.fillStyle = '#93c5fd'; ctx.fillRect(x, padTop + plotH - hPlan, barW, hPlan);
+    ctx.fillStyle = '#059669'; ctx.fillRect(x + barW, padTop + plotH - hAct, barW, hAct);
+  });
+
+  // labels
+  ctx.fillStyle = '#64748b';
+  const labelEvery = Math.max(1, Math.ceil(entries.length / 14));
+  entries.forEach(([k], i) => {
+    if (i % labelEvery !== 0 && i !== entries.length - 1) return;
+    const cx = padLeft + i * slot + slot / 2;
+    ctx.save(); ctx.translate(cx, padTop + plotH + 8); ctx.rotate(-Math.PI / 4);
+    ctx.textAlign = 'right'; ctx.textBaseline = 'middle';
+    ctx.fillText(k.slice(5), 0, 0); ctx.restore();
+  });
+
+  // legend
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = '#1f2937';
+  ctx.font = '11px system-ui, sans-serif';
+  ctx.textAlign = 'left';
+  ctx.fillText('■ Planned Qty', padLeft, cssH - 10);
+  ctx.fillStyle = '#059669';
+  ctx.fillText('■ Actual Offline', padLeft + 110, cssH - 10);
+}
 
 window.MRP = STATE;
