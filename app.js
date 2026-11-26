@@ -385,7 +385,7 @@ window.addEventListener('DOMContentLoaded', async () => {
   await renderAllFileChips();
   await renderStoredFilesTab();
   await autoReloadStoredFiles();
-
+  renderProductionControl();
 });
 
 async function loadConfig() {
@@ -1555,11 +1555,8 @@ async function handleBatchFiles(files) {
     COMP_COLOR_COLLAPSED.clear();
      
     classifyBatches();
-    renderBatchStats();
-    renderBatchTable();
-    computeInventory();
-    renderInventoryTable();
-    renderPlanning();
+    // Legacy renderers removed — they target the old removed DOM
+    renderProductionControl(); // Update the new tab
 
     /* Non-blocking summary of what came from where. */
     if (sheetsReport.length > 1) {
@@ -2616,6 +2613,9 @@ function renderInventoryTable() {
 /* =========================================================
    BUTTONS
    ========================================================= */
+/* =========================================================
+   BUTTONS
+   ========================================================= */
 function bindButtons() {
   /* BOM List */
   $('#bomFolderPick')?.addEventListener('click', pickBomFolder);
@@ -2653,7 +2653,7 @@ function bindButtons() {
   });
   $('#exportPlan')?.addEventListener('click', exportPlan);
 
-  /* Settings — warehouses */
+  /* Settings */
   $('#whAdd')?.addEventListener('click', () => {
     STATE.config.warehouses.push({
       id: 'WH' + (STATE.config.warehouses.length + 1),
@@ -2665,58 +2665,12 @@ function bindButtons() {
   });
   $('#whSave')?.addEventListener('click', saveWarehouses);
 
-  /* Settings — conversion table */
   $('#convAdd')?.addEventListener('click', () => {
     STATE.config.conversionTable.push({ modelo: '', color: '', vehicleMatNo: '' });
     renderConversionTable();
   });
   $('#convSave')?.addEventListener('click', saveConversionTable);
-
-  /* Settings — reset */
-  $('#resetAll')?.addEventListener('click', () => {
-    if (!confirm('Erase all uploaded data and local overrides?')) return;
-    STATE.boms = []; STATE.batches = []; STATE.plan = []; STATE.scrap = [];
-    STATE.inventory = {}; STATE.partIndex = {};
-    STATE.batchView = { sorts: {}, filters: {} };
-    STATE.bomRegistry = new Map();
-    STATE.bomCounter  = new Map();
-    STATE.mrpStock = {
-      items: [], byPartNo: {}, loaded: false, fileName: '',
-      model: '', variantKey: '', demands: []
-    };
-    const sp = $('#stockFilePath'); if (sp) sp.value = '';
-    const si = $('#stockFileInfo'); if (si) si.textContent = 'No stock file loaded.';
-    WHERE_USED_OPEN.clear();
-    savePersistedScrap();
-    try { localStorage.removeItem(LS_CONFIG); } catch(e){}
-    _bomFolderHandle = null;
-    _bomFolderFiles  = [];
-    if ($('#bomFolderPath')) $('#bomFolderPath').value = '';
-    if ($('#bomFolderInfo')) $('#bomFolderInfo').textContent = 'No folder selected yet.';
-    if ($('#bomFolderProcess')) $('#bomFolderProcess').disabled = true;
-    if ($('#bomProgressWrap')) $('#bomProgressWrap').classList.add('hidden');
-    if ($('#bomListSearch')) $('#bomListSearch').value = '';
-    if ($('#bomListSearchResult')) {
-      $('#bomListSearchResult').classList.add('hidden');
-      $('#bomListSearchResult').innerHTML = '';
-    }
-    if ($('#bomProgressToggle')) {
-      $('#bomProgressToggle').classList.add('hidden');
-      $('#bomProgressToggle').classList.remove('has-errors');
-    }
-    if ($('#bomProgressList')) $('#bomProgressList').classList.add('hidden');
-    renderBomList();
-    renderBomTable();
-    renderBatchTable();
-    renderBatchStats();
-    renderInventoryTable();
-    renderPlanList();
-    renderPlanning();
-    renderScrapList();
-    renderConversionTable();
-  });
 }
-
 /* =========================================================
    PLAN
    ========================================================= */
@@ -3577,11 +3531,6 @@ async function handleProductionFiles(files) {
     
     if ($('#prodPeriodFrom')) $('#prodPeriodFrom').value = min || '';
     if ($('#prodPeriodTo')) $('#prodPeriodTo').value   = max || '';
-
-    // Highlight the "Full Range" button if it exists
-    $$('.prod-period-btn').forEach(b =>
-      b.classList.toggle('primary', b.dataset.range === 'all'));
-
     /* --- Render --- */
     if (typeof renderLineModelOptions === 'function') renderLineModelOptions();
     
@@ -4980,7 +4929,7 @@ function bindProduction() {
   const dz    = $('#prodDrop');
   const input = $('#prodInput');
   if (!dz || !input) return;
-
+  if (!$('#prodDrop') && !$('#prodBatchSearch')) return;
   /* --- File input --- */
   input.addEventListener('change', e => {
     handleProductionFiles(Array.from(e.target.files || []));
