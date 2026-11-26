@@ -1893,41 +1893,8 @@ function renderBatchStats() {
     edgeLine:     'Manual stage',
     consumed:     'TRIM IN DATE in the past and Production = DONE'
   }
-  function breakdownHtml(byModel) {
+    function breakdownHtml(byModel) {
     const entries = Object.entries(byModel || {}).sort((a,b) => b[1].qty - a[1].qty);
-    if (!entries.length) return '';
-    return `<div class="byModel">${entries.map(([m, v]) => `
-      <div class="byModel-row">
-        <span class="m-name" title="${escapeHtml(m)}">${escapeHtml(shorten(m, 22))}</span>
-        <span class="m-val">${fmt(v.qty)} <small>v · ${v.count} b</small></span>
-      </div>`).join('')}</div>`;
-  }
-  statsEl.innerHTML = `
-    <div class="stat">
-      <div class="label">All batches</div>
-      <div class="value">${fmt(totalQty)}<span class="unit">vehicles</span></div>
-      <div class="sub"><b>${fmt(totalCount)}</b> batches total</div>
-    </div>
-    ${Object.entries(stages).map(([k, s]) => {
-      const a = agg[k] || { count:0, qty:0, byModel:{} };
-      return `<div class="stat" title="${escapeHtml(rules[k]||'')}">
-        <div class="label"><span class="stage"><span class="dot" style="background:${s.color}"></span>${s.label}</span></div>
-        <div class="value">${fmt(a.qty)}<span class="unit">vehicles</span></div>
-        <div class="sub"><b>${fmt(a.count)}</b> batches</div>
-        ${breakdownHtml(a.byModel)}
-      </div>`;
-    }).join('')}
-    <div class="stat" title="Could not be classified automatically — missing dates">
-      <div class="label">Unassigned</div>
-      <div class="value">${fmt((agg.unassigned||{}).qty||0)}<span class="unit">vehicles</span></div>
-      <div class="sub"><b>${fmt((agg.unassigned||{}).count||0)}</b> batches</div>
-      ${breakdownHtml((agg.unassigned||{}).byModel)}
-    </div>`;
-}
-
-  function breakdownHtml(byModel) {
-    const entries = Object.entries(byModel || {})
-      .sort((a,b) => b[1].qty - a[1].qty);
     if (!entries.length) return '';
     return `<div class="byModel">
       ${entries.map(([m, v]) => `
@@ -1939,7 +1906,7 @@ function renderBatchStats() {
     </div>`;
   }
 
-  $('#batchStats').innerHTML = `
+  statsEl.innerHTML = `
     <div class="stat">
       <div class="label">All batches</div>
       <div class="value">${fmt(totalQty)}<span class="unit">vehicles</span></div>
@@ -1965,7 +1932,6 @@ function renderBatchStats() {
     </div>
   `;
 }
-
 /* =========================================================
    BATCH TABLE
    ========================================================= */
