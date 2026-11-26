@@ -3545,10 +3545,10 @@ async function handleProductionFiles(files) {
     STATE.production.vinView.stage = 'all';
     STATE.production.periodStage        = '';   // ← ADD
     STATE.production.pendingPeriodStage = '';   // ← ADD
-    $('#prodPeriodStage').value = '';           // ← ADD     
-    $('#prodBatchSearch').value = '';
-    $('#prodVinSearch').value = '';
-    $('#prodVinStage').value = 'all';
+    if ($('#prodPeriodStage')) $('#prodPeriodStage').value = '';           
+    if ($('#prodBatchSearch')) $('#prodBatchSearch').value = '';
+    if ($('#prodVinSearch')) $('#prodVinSearch').value = '';
+    if ($('#prodVinStage')) $('#prodVinStage').value = 'all';
 
      PROD_BATCH_EXPANDED.clear();
      PROD_LINE_COLLAPSED.clear();     // ← add
@@ -3847,6 +3847,8 @@ function setProductionPeriod(from, to, lines = null, models = null, stage = '') 
 
 
 function renderAllProductionViews() {
+  const batchTable = $('#prodBatchTable');
+  if (!batchTable) return; // Stop if we are using the new Production Control tab
   renderProductionStats();
   renderProductionBatchTable();
   renderProductionVinTable();
