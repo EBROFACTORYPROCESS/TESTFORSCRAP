@@ -1499,7 +1499,7 @@ async function handleBatchFiles(files) {
   if (!f) return;
   try {
     const sheets = await fileToSheetRows(f);
-
+    const p = $('#pcPlanPath'); if (p) p.value = f.name;
     let sheetsToProcess;
     if (sheets.length === 1) {
       sheetsToProcess = sheets;
@@ -3484,6 +3484,7 @@ async function handleProductionFiles(files) {
 
   try {
     const text = await readFileAsText(f);
+    const p = $('#pcExecPath'); if (p) p.value = f.name;
     if (label) label.textContent = `Parsing ${fmt(text.length)} characters…`;
     await yieldToUI();
 
@@ -3803,12 +3804,16 @@ function setProductionPeriod(from, to, lines = null, models = null, stage = '') 
 
 
 function renderAllProductionViews() {
-  const batchTable = $('#prodBatchTable');
-  if (!batchTable) return; // Stop if we are using the new Production Control tab
-  renderProductionStats();
-  renderProductionBatchTable();
-  renderProductionVinTable();
-  renderProductionChart();
+  // If we are in the new tab, render the VIN table and chart to the new DOM IDs
+  if ($('#pcVinTable')) {
+    renderProductionVinTable();
+    renderProductionChart(); // Note: we will map the chart ID in the next step
+  } else {
+    renderProductionStats();
+    renderProductionBatchTable();
+    renderProductionVinTable();
+    renderProductionChart();
+  }
 }
 
 function updateProductionPeriodHint() {
@@ -4474,8 +4479,8 @@ function getFilteredProductionVins() {
 }
 
 function renderProductionVinTable() {
-  const tbl = $('#prodVinTable');
-  const pg  = $('#prodVinPagination');
+  const tbl = $('#pcVinTable');
+  const pg  = $('#pcVinPagination');
   if (!STATE.production.loaded) {
     tbl.innerHTML = `<thead><tr><th>No production data loaded</th></tr></thead>`;
     pg.innerHTML = '';
@@ -4495,7 +4500,7 @@ function renderProductionVinTable() {
   const start = (v.page - 1) * v.pageSize;
   const pageRows = filtered.slice(start, start + v.pageSize);
 
-  $('#prodVinCount').innerHTML =
+  if ($('#pcVinCount')) $('#pcVinCount').innerHTML = 
     `<b>${fmt(total)}</b> VIN${total === 1 ? '' : 's'} match · showing ${fmt(start + 1)}–${fmt(Math.min(start + v.pageSize, total))}`;
 
   const head = `
