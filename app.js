@@ -3518,22 +3518,24 @@ async function handleProductionFiles(files) {
   const f = files[0];
   if (!f) return;
 
-  const wrap  = $('#pcXmlProgressWrap');      // Route to new tab
-  const fill  = $('#pcXmlProgressFill');      // Route to new tab
-  const label = $('#pcXmlProgressLabel');     // Route to new tab
-  wrap.classList.remove('hidden');
-  fill.style.width = '0%';
-  label.textContent = `Reading ${f.name} (${fmt(f.size / 1048576)} MB)…`;
+  // Use the new tab's progress bar if it exists, otherwise ignore
+  const wrap  = $('#pcXmlProgressWrap');
+  const fill  = $('#pcXmlProgressFill');
+  const label = $('#pcXmlProgressLabel');
+  
+  if (wrap) wrap.classList.remove('hidden');
+  if (fill) fill.style.width = '0%';
+  if (label) label.textContent = `Reading ${f.name} (${fmt(f.size / 1048576)} MB)…`;
   await yieldToUI();
 
   try {
     const text = await readFileAsText(f);
-    label.textContent = `Parsing ${fmt(text.length)} characters…`;
+    if (label) label.textContent = `Parsing ${fmt(text.length)} characters…`;
     await yieldToUI();
 
     const { records, header } = await parseProductionCSV(text, (p, n) => {
-      fill.style.width = (p * 100).toFixed(1) + '%';
-      label.textContent = `Parsing… ${(p * 100).toFixed(0)}% · ${fmt(n)} VINs extracted`;
+      if (fill) fill.style.width = (p * 100).toFixed(1) + '%';
+      if (label) label.textContent = `Parsing… ${(p * 100).toFixed(0)}% · ${fmt(n)} VINs extracted`;
     });
 
     if (!records.length) throw new Error('No valid VIN rows found');
@@ -3547,20 +3549,22 @@ async function handleProductionFiles(files) {
     STATE.production.batchView.search = '';
     STATE.production.vinView.search = '';
     STATE.production.vinView.stage = 'all';
-    STATE.production.periodStage        = '';   // ← ADD
-    STATE.production.pendingPeriodStage = '';   // ← ADD
+    STATE.production.periodStage        = '';   
+    STATE.production.pendingPeriodStage = '';   
+    
+    // Safely clear old UI elements if they still exist
     if ($('#prodPeriodStage')) $('#prodPeriodStage').value = '';           
     if ($('#prodBatchSearch')) $('#prodBatchSearch').value = '';
     if ($('#prodVinSearch')) $('#prodVinSearch').value = '';
     if ($('#prodVinStage')) $('#prodVinStage').value = 'all';
 
-     PROD_BATCH_EXPANDED.clear();
-     PROD_LINE_COLLAPSED.clear();     // ← add
-     PROD_SPEC_COLLAPSED.clear();
-     PROD_COLOR_COLLAPSED.clear();
-     COMP_LINE_COLLAPSED.clear();
-     COMP_MODEL_COLLAPSED.clear();
-     COMP_COLOR_COLLAPSED.clear();
+    PROD_BATCH_EXPANDED.clear();
+    PROD_LINE_COLLAPSED.clear();
+    PROD_SPEC_COLLAPSED.clear();
+    PROD_COLOR_COLLAPSED.clear();
+    COMP_LINE_COLLAPSED.clear();
+    COMP_MODEL_COLLAPSED.clear();
+    COMP_COLOR_COLLAPSED.clear();
 
     /* --- Default monitoring period = entire file --- */
     const { min, max } = getFileDateBounds();
@@ -3571,30 +3575,29 @@ async function handleProductionFiles(files) {
     STATE.production.models        = null;
     STATE.production.pendingModels = null;
     
-     $('#prodPeriodFrom').value = min || '';
-    $('#prodPeriodTo').value   = max || '';
+    if ($('#prodPeriodFrom')) $('#prodPeriodFrom').value = min || '';
+    if ($('#prodPeriodTo')) $('#prodPeriodTo').value   = max || '';
 
-    /* Highlight the "Full Range" button */
+    // Highlight the "Full Range" button if it exists
     $$('.prod-period-btn').forEach(b =>
       b.classList.toggle('primary', b.dataset.range === 'all'));
 
     /* --- Render --- */
-    renderLineModelOptions();
-    fill.style.width = '100%';
-    label.textContent = `Done — ${fmt(records.length)} VINs · ${fmt(STATE.production.batches.size)} batches`;
+    if (typeof renderLineModelOptions === 'function') renderLineModelOptions();
+    
+    if (fill) fill.style.width = '100%';
+    if (label) label.textContent = `Done — ${fmt(records.length)} VINs · ${fmt(STATE.production.batches.size)} batches`;
 
-    renderAllProductionViews();
-    updateProductionPeriodHint();
-    updateApplyButtonState();
-    renderProductionControl(); 
-    setTimeout(() => wrap.classList.add('hidden'), 3000);
+    // The critical trigger for the new tab
+    renderProductionControl();
+
+    setTimeout(() => { if (wrap) wrap.classList.add('hidden'); }, 3000);
   } catch (e) {
     console.error(e);
-    label.textContent = `Failed: ${e.message}`;
+    if (label) label.textContent = `Failed: ${e.message}`;
     alert(`Failed to parse production file: ${e.message}`);
   }
 }
-
 function clearProduction() {
   if (!STATE.production.loaded) return;
   if (!confirm('Clear all loaded production tracking data?')) return;
