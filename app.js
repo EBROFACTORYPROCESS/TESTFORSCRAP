@@ -9418,7 +9418,6 @@ const _origBindPC = bindProductionControl;
 bindProductionControl = function() {
   _origBindPC.apply(this, arguments);
   bindPcFilters();
-  );
 };
 
 /* ---------- Also re-render whenever the plan or exec file is loaded ---------- */
