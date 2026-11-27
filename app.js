@@ -4034,7 +4034,7 @@ function renderProductionChart() {
   }
 
   const granularity = $('#pcChartGranularity').value;
-  const stageKey    = $('#prodChartStage').value;
+  const stageKey    = $('#pcChartStage').value;
 
 
   const buckets = new Map();
@@ -8950,7 +8950,8 @@ function bindProductionControl() {
     if (typeof window.showOpenFilePicker !== 'function') { $('#prodInput')?.click(); return; }
     pickProductionFile();
   });
-
+  $('#pcChartGranularity')?.addEventListener('change', renderProductionChart);
+  $('#pcChartStage')?.addEventListener('change', renderProductionChart);
   /* Try to restore any previously stored handles for the transit slot */
   (async () => {
     const { handle, perm } = await getSlotStatus('transitFile');
@@ -9397,7 +9398,7 @@ function bindPcFilters() {
     }
     renderProductionControl();
   });
-     $$('#pcPeriodControls .pc-period-btn').forEach(btn => {
+    $$('#pcPeriodControls .pc-period-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       STATE.productionControl.daily.period = btn.dataset.range;
       $$('#pcPeriodControls .pc-period-btn').forEach(b => b.classList.remove('primary'));
